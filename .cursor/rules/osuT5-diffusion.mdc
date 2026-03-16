@@ -1,0 +1,28 @@
+---
+description: osuT5 model and osu_diffusion module conventions
+globs: osuT5/**/*.py,osu_diffusion/**/*.py
+alwaysApply: false
+---
+
+# osuT5 & osu_diffusion Conventions
+
+## osuT5
+- **Tokenizer**: Event-based; time quantized to 10ms, positions to 32px grid
+- **Model**: Whisper-based encoder, custom decoder; ~219M params
+- **Context window**: 8.192s audio; use 90% overlap for long generation
+- **Events**: Hit objects, timing, kiai, SV, new combos, hitsounds
+
+## osu_diffusion
+- Refines quantized positions from osuT5 output
+- Uses last 10% of noise schedule
+- `DiT_models`, `DiffusionTrainConfig` in config
+- Slider end positions recalculated from control path + required length
+
+## Code Patterns
+- `events_of_type()`, `merge_events()` for event filtering
+- `routed_pickle` for safe deserialization
+- `load_model_loaders()` for checkpoint loading
+- LoRA: `peft` for adapters; specify via `lora_path`
+
+## Gamemodes
+0=std, 1=taiko, 2=ctb, 3=mania

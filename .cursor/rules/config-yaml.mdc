@@ -1,0 +1,25 @@
+---
+description: Hydra YAML config conventions
+globs: configs/**/*.yaml
+alwaysApply: false
+---
+
+# Config YAML Conventions
+
+## Structure
+- `defaults:` — References like `/inference/base@_here_` or `_here_`
+- Group configs: `inference/`, `train/`, `model/`
+- Legacy configs in `configs/legacy/`
+
+## Inference Keys
+- Paths: `model_path`, `audio_path`, `output_path`, `beatmap_path`, `lora_path`
+- Generation: `gamemode`, `difficulty`, `mapper_id`, `year`, `descriptors`, `negative_descriptors`
+- Sampling: `cfg_scale`, `temperature`, `top_p`, `top_k`
+- Diffusion: `diff_ckpt`, `refine_iters`, `timesteps`, `max_seq_len`
+
+## Override Syntax
+Users pass `key=value` or `key=[a,b]` on CLI. Use `null` for optional params.
+
+## Don’t
+- Hardcode absolute paths; use placeholders or relative
+- Mix config groups; keep inference/train/model separate
