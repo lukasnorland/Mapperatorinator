@@ -17,6 +17,8 @@ from torch.optim.lr_scheduler import (
 from ..dataset.ors_dataset import OrsDataset
 from ..dataset.osu_parser import OsuParser
 from ..dataset.mmrs_dataset import MmrsDataset
+from ..dataset.snapbeat_dataset import SnapBeatDataset
+from ..dataset.snapbeat_parser import SnapBeatParser
 from ..event import EventType
 from ..model.configuration_mapperatorinator import MapperatorinatorConfig
 from ..model.modeling_mapperatorinator import Mapperatorinator
@@ -347,12 +349,21 @@ def get_dataset(args: TrainConfig, test: bool, **kwargs) -> Dataset:
         return OrsDataset(args=args.data, test=test, **kwargs)
     elif args.data.dataset_type == "mmrs":
         return MmrsDataset(args=args.data, **kwargs)
+    elif args.data.dataset_type == "snapbeat":
+        return SnapBeatDataset(args=args.data, test=test, **kwargs)
     else:
         raise NotImplementedError
 
 
 def get_dataloaders(tokenizer: Tokenizer, args: TrainConfig, shared: Namespace) -> tuple[DataLoader, DataLoader]:
-    parser = OsuParser(args, tokenizer)
+    if args.data.dataset_type == "snapbeat":
+        parser = SnapBeatParser(
+            types_first=args.data.types_first,
+            add_snapping=args.data.add_snapping,
+            sustain_interval=args.data.sustain_interval,
+        )
+    else:
+        parser = OsuParser(args, tokenizer)
     dataset = {
         "train": get_dataset(
             args=args,
