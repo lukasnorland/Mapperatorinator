@@ -375,8 +375,8 @@ class SnapBeatDataset(IterableDataset):
                     label_tokens[si - 1] = self.tokenizer.context_sos[context["context_type"]]
                 si += 1
 
-            start_label_index = si + context["labels_offset"]
             si = add_special_tokens(context["special_tokens"], si)
+            start_label_index = si + context["labels_offset"]
 
             num_to_add = min(len(context["tokens"]), max_tokens)
             input_tokens[si:si + num_to_add] = context["tokens"][:num_to_add]

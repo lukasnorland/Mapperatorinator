@@ -65,7 +65,10 @@ def maybe_save_checkpoint(model, accelerator: Accelerator, args: TrainConfig, sh
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.save_pretrained(os.path.join(output_dir, "lora"))
 
-        wandb_tracker = accelerator.get_tracker("wandb")
+        try:
+            wandb_tracker = accelerator.get_tracker("wandb")
+        except ValueError:
+            wandb_tracker = None
         if wandb_tracker is not None:
             art = wandb.Artifact(
                 f"osuT5-{wandb.run.id}",
@@ -408,7 +411,10 @@ def train_profiling(
 
     def on_trace_ready(trace):
         tensorboard_trace_handler(trace)
-        wandb_tracker = accelerator.get_tracker("wandb")
+        try:
+            wandb_tracker = accelerator.get_tracker("wandb")
+        except ValueError:
+            wandb_tracker = None
         if wandb_tracker is not None:
             wandb.save(glob.glob(f"./profiler_logs/*.pt.trace.json")[0], base_path="profiler_logs")
 
