@@ -61,6 +61,8 @@ class DataConfig:
     test_dataset_path: str = "/workspace/datasets/MMRS39389"  # Testing/validation dataset directory
     test_dataset_start: int = 38689  # Testing/validation dataset start index
     test_dataset_end: int = 39389  # Testing/validation dataset end index
+    # SnapBeat: if set, load audio from this directory instead of {train,test}_dataset_path/audio
+    snapbeat_audio_path: str = ""
     src_seq_len: int = 1024
     tgt_seq_len: int = 2048
     sample_rate: int = 16000

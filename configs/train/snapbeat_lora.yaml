@@ -4,10 +4,16 @@ defaults:
 
 pretrained_path: "OliBomby/Mapperatorinator-v31"
 
+# Avoid W&B unless configured; use tensorboard (see docs/SNAPBEAT_FINETUNING.md).
+logging:
+  log_with: tensorboard
+
 data:
   dataset_type: "snapbeat"
-  train_dataset_path: "./datasets/amaremix"
-  test_dataset_path: "./datasets/amaremix"
+  # JSON: ./datasets/dataset/json. Audio: ./datasets/dataset/audio (same UUID stems). Override with data.snapbeat_audio_path if audio lives elsewhere (e.g. ./dataset/audio).
+  train_dataset_path: "./datasets/dataset"
+  test_dataset_path: "./datasets/dataset"
+  snapbeat_audio_path: ""
   train_dataset_start: 0
   train_dataset_end: 410
   test_dataset_start: 410

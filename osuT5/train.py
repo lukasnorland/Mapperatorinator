@@ -1,3 +1,5 @@
+import sys
+
 import hydra
 import torch
 from accelerate import Accelerator, DistributedDataParallelKwargs
@@ -42,15 +44,18 @@ def main(args: TrainConfig):
         ),
         kwargs_handlers=[ddp_kwargs],
     )
+    wandb_init = {
+        "job_type": "training",
+        "sync_tensorboard": args.profile.do_profile,
+    }
+    # Do not pass mode="online" from defaults — it overrides W&B's interactive
+    # "offline" choice and env (WANDB_MODE), causing 401 when not logged in.
+    if getattr(args.logging, "mode", None) not in (None, "online"):
+        wandb_init["mode"] = args.logging.mode
+
     accelerator.init_trackers(
         "osuT5",
-        init_kwargs={
-            "wandb": {
-                "job_type": "training",
-                "sync_tensorboard": args.profile.do_profile,
-                "mode": args.logging.mode,
-            }
-        }
+        init_kwargs={"wandb": wandb_init},
     )
 
     setup_args(args)
@@ -102,6 +107,11 @@ def main(args: TrainConfig):
     if args.checkpoint_path:
         accelerator.load_state(args.checkpoint_path)
         shared.current_train_step = scheduler.scheduler.last_epoch // accelerator.num_processes + 1
+
+    if args.compile and sys.platform == "win32" and args.device != "cpu":
+        # torch.compile → Inductor needs Triton; CUDA Triton is not shipped for Windows.
+        print("torch.compile disabled on Windows+CUDA (no Triton); using eager mode.")
+        args.compile = False
 
     if args.compile:
         model = torch.compile(model)

@@ -229,15 +229,16 @@ def main(args: TrainConfig):
             project_dir="", logging_dir="tensorboard_logs"
         ),
     )
+    wandb_init = {
+        "entity": "mappingtools",
+        "job_type": "testing",
+    }
+    if getattr(args.logging, "mode", None) not in (None, "online"):
+        wandb_init["mode"] = args.logging.mode
+
     accelerator.init_trackers(
         "osuT5",
-        init_kwargs={
-            "wandb": {
-                "entity": "mappingtools",
-                "job_type": "testing",
-                "mode": args.logging.mode,
-            }
-        }
+        init_kwargs={"wandb": wandb_init},
     )
 
     model, tokenizer = load_model(

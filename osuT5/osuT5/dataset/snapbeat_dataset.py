@@ -27,7 +27,8 @@ class SnapBeatDataset(IterableDataset):
 
         {path}/
             json/   *.json   (SnapBeat v1.0 charts)
-            audio/  *.mp3|*.wav|*.flac  (matched by UUID stem)
+            audio/  *.mp3|*.wav|*.flac|*.ogg  (matched by UUID stem), unless
+            ``DataConfig.snapbeat_audio_path`` points at a separate audio folder.
     """
 
     def __init__(
@@ -65,10 +66,27 @@ class SnapBeatDataset(IterableDataset):
     def _discover_pairs(self) -> list[tuple[Path, Path]]:
         """Find (json_path, audio_path) pairs in the dataset folder."""
         json_dir = self.path / "json"
-        audio_dir = self.path / "audio"
+        audio_dir = (
+            Path(self.args.snapbeat_audio_path)
+            if (self.args.snapbeat_audio_path or "").strip()
+            else self.path / "audio"
+        )
 
         if not json_dir.is_dir() or not audio_dir.is_dir():
-            raise FileNotFoundError(f"Expected json/ and audio/ subdirectories in {self.path}")
+            missing = []
+            if not self.path.is_dir():
+                missing.append(f"dataset root does not exist: {self.path.resolve()}")
+            else:
+                if not json_dir.is_dir():
+                    missing.append(f"missing {json_dir}")
+                if not audio_dir.is_dir():
+                    missing.append(f"missing {audio_dir}")
+            hint = (
+                "Add json/ under the dataset path and audio files (UUID-matched stems). "
+                "Use data.snapbeat_audio_path if audio lives outside that path (e.g. ./dataset/audio). "
+                "See docs/SNAPBEAT_FINETUNING.md."
+            )
+            raise FileNotFoundError(f"SnapBeat dataset layout invalid ({'; '.join(missing)}). {hint}")
 
         audio_by_stem: dict[str, Path] = {}
         for f in audio_dir.iterdir():

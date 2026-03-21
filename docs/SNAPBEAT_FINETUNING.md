@@ -9,7 +9,12 @@ This guide explains how to fine-tune Mapperatorinator on a SnapBeat dataset usin
 - **Conda environment**: `mapperatorinator` with all dependencies installed.
 - **ffmpeg**: Required for audio loading (`conda install -n mapperatorinator ffmpeg`).
 - **torchaudio**: Required for spectrogram generation (`pip install torchaudio`).
-- **W&B** (optional): If not using W&B, pass `logging.log_with=tensorboard` on the CLI.
+- **W&B** (optional): The default config uses tensorboard. To use W&B instead, pass `logging.log_with=wandb` on the CLI.
+
+### Platform notes
+
+- **Linux** is the primary training platform. `torch.compile`, Triton, and multi-worker dataloaders all work as expected.
+- **Windows + CUDA**: `torch.compile` is skipped automatically (Triton is unavailable). Multi-worker `IterableDataset` loaders can deadlock at epoch boundaries; use `dataloader.num_workers=0` if training hangs between epochs.
 
 ---
 
@@ -18,12 +23,16 @@ This guide explains how to fine-tune Mapperatorinator on a SnapBeat dataset usin
 The dataset follows a UUID-matched directory structure:
 
 ```text
-datasets/amaremix/
-  json/    *.json    (SnapBeat v1.0 charts)
-  audio/   *.mp3|*.wav|*.flac  (matched by UUID stem)
+{dataset_root}/
+  json/    *.json    (SnapBeat v1.0 / MT3 charts)
+  audio/   *.mp3|*.wav|*.flac|*.ogg  (matched by UUID stem)
 ```
 
 Each JSON file is matched to its audio file by UUID filename stem. The dataset class (`SnapBeatDataset`) auto-discovers these pairs.
+
+**Neither JSON nor audio is committed to git** (too large / licensing). You must populate `datasets/dataset/json/` with **456** SnapBeat chart JSON files and `datasets/dataset/audio/` with matching audio files (same UUID stems). The default `snapbeat_lora` config expects 456 pairs split as 410 train / 46 test.
+
+If your audio lives in a separate directory, set `data.snapbeat_audio_path` to that folder (see [datasets/dataset/audio/README.md](../datasets/dataset/audio/README.md)).
 
 ---
 
@@ -36,7 +45,7 @@ Each JSON file is matched to its audio file by UUID filename stem. The dataset c
 | Parser | `osuT5/osuT5/dataset/snapbeat_parser.py` | SnapBeat JSON → `(events, event_times)` using mania EventTypes |
 | Dataset | `osuT5/osuT5/dataset/snapbeat_dataset.py` | Loads audio + chart pairs, builds training samples |
 | Model wiring | `osuT5/osuT5/utils/model_utils.py` | Routes `dataset_type=snapbeat` to SnapBeatDataset/Parser |
-| Config | `configs/train/snapbeat_lora.yaml` | LoRA fine-tuning config for amaremix dataset |
+| Config | `configs/train/snapbeat_lora.yaml` | LoRA fine-tuning config (456-chart `datasets/dataset` split) |
 | Inference | `snapbeat_inference.py` | Generate charts from audio using fine-tuned model |
 | Converter | `snapbeat_converter.py` | Convert .osu mania output to SnapBeat JSON |
 
@@ -61,27 +70,26 @@ Only mania-compatible tokens are used. No tokenizer changes needed.
 
 ## 4. Running training
 
-From the repo root:
+From the repo root (relative paths are resolved against the original working directory automatically):
 
 ```bash
 python osuT5/train.py --config-name snapbeat_lora
 ```
 
-If dataset paths don't resolve (Hydra changes cwd), use absolute paths:
+To use absolute paths (e.g. if your dataset is elsewhere):
 
 ```bash
 python osuT5/train.py --config-name snapbeat_lora \
-  data.train_dataset_path=/absolute/path/to/datasets/amaremix \
-  data.test_dataset_path=/absolute/path/to/datasets/amaremix
+  data.train_dataset_path=/path/to/your/dataset_root \
+  data.test_dataset_path=/path/to/your/dataset_root
 ```
 
-To skip W&B and use tensorboard:
+On **PowerShell**, use a single line or backtick (`` ` ``) continuation — **not** `^`:
 
-```bash
-python osuT5/train.py --config-name snapbeat_lora \
-  logging.log_with=tensorboard \
-  data.train_dataset_path=/absolute/path/to/datasets/amaremix \
-  data.test_dataset_path=/absolute/path/to/datasets/amaremix
+```powershell
+python osuT5/train.py --config-name snapbeat_lora `
+  data.train_dataset_path=D:/path/to/your/dataset_root `
+  data.test_dataset_path=D:/path/to/your/dataset_root
 ```
 
 Override any hyperparameter via CLI:
@@ -99,6 +107,15 @@ python osuT5/train.py --config-name snapbeat_lora \
 - 2000 total steps, eval every 200, checkpoint every 500
 - DT augmentation: prob=0.3, speed range [1.1, 1.4]
 - Mania-only tokens: gamemode, keycount, hold_note_ratio (other osu! tokens disabled)
+
+### Resuming from a checkpoint
+
+```bash
+python osuT5/train.py --config-name snapbeat_lora \
+  checkpoint_path=/path/to/logs/YYYY-MM-DD/HH-MM-SS/checkpoint-500
+```
+
+Checkpoints are saved under the Hydra output directory (`logs/`). To reduce risk of lost progress, lower `checkpoint.every_steps` (e.g. `checkpoint.every_steps=100`).
 
 ---
 
@@ -122,6 +139,18 @@ To use a fine-tuned LoRA checkpoint, point to the adapter directory.
 
 Input-only special tokens (GAMEMODE, MANIA_KEYCOUNT, HOLD_NOTE_RATIO) have token IDs beyond the model's output vocabulary size. These were incorrectly included in decoder labels, causing CUDA device-side asserts during training. Fixed by computing `start_label_index` after adding special tokens so labels only contain event tokens within the output vocab range.
 
-### W&B tracker crash when using tensorboard (fixed)
+### W&B 401 when not logged in (fixed)
 
-`accelerator.get_tracker("wandb")` throws `ValueError` instead of returning `None` when W&B is not the active tracker. Fixed with try/except in `train_utils.py`.
+The config default `logging.mode: online` was passed into `wandb.init()` even when the user selected offline mode interactively, causing a 401. Fixed: `mode` is only forwarded when explicitly set to something other than `online`. The `snapbeat_lora` config defaults to tensorboard, avoiding W&B entirely.
+
+### Hydra cwd breaks relative dataset paths (fixed)
+
+Hydra changes the working directory to `logs/...` at startup, so relative paths like `./datasets/dataset` resolved incorrectly. Fixed in `setup_args()` which now resolves relative data paths against `hydra.utils.get_original_cwd()`.
+
+### Windows: torch.compile fails (Triton unavailable, auto-skipped)
+
+`torch.compile` requires Triton, which is not available on Windows CUDA. `train.py` detects `sys.platform == "win32"` and skips compilation automatically.
+
+### Windows: training hangs at epoch boundaries
+
+Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when a new epoch restarts the iterator. SnapBeat dataloaders use `persistent_workers=False` automatically. If training still hangs, use `dataloader.num_workers=0`.

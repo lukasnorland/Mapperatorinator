@@ -385,13 +385,18 @@ def get_dataloaders(tokenizer: Tokenizer, args: TrainConfig, shared: Namespace) 
     for split in ["train", "test"]:
         batch_size = args.optim.batch_size // args.optim.grad_acc
 
+        # SnapBeat uses IterableDataset; persistent workers often stall or hang when the
+        # iterator restarts at epoch 2+ (especially on Windows with spawn).
+        nw = args.dataloader.num_workers
+        persist = nw > 0 and args.data.dataset_type != "snapbeat"
+
         dataloaders[split] = DataLoader(
             dataset[split],
             batch_size=batch_size,
-            num_workers=args.dataloader.num_workers,
+            num_workers=nw,
             pin_memory=args.dataloader.pin_memory,
             drop_last=args.dataloader.drop_last,
-            persistent_workers=args.dataloader.num_workers > 0,
+            persistent_workers=persist,
             worker_init_fn=worker_init_fn,
         )
 
