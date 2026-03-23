@@ -101,11 +101,14 @@ python osuT5/train.py --config-name snapbeat_lora \
 
 ### Config highlights (`snapbeat_lora.yaml`)
 
-- Pretrained: `OliBomby/Mapperatorinator-v31` with LoRA (r=64, alpha=128, PiSSA init)
+- Pretrained: `OliBomby/Mapperatorinator-v31` with LoRA (r=64, alpha=128, PiSSA init, targets: q/k/v/out_proj + fc1/fc2)
 - 456 total samples: 410 train / 46 test
 - Optimizer: Muon, lr=2e-4/1e-4, batch=16, grad_acc=8
-- 2000 total steps, eval every 200, checkpoint every 500
-- DT augmentation: prob=0.3, speed range [1.1, 1.4]
+- 1000 total steps, eval every 200, checkpoint every 500
+- DT augmentation: prob=0.15, speed range [1.1, 1.4]
+- Timing context enabled: `add_timing`, `add_timing_points`, `add_snapping` (provides BPM and beat structure)
+- `timing_random_offset: 0` (no jitter on timing labels for exact-match accuracy)
+- LoRA targets: attention projections + feedforward layers (`fc1`, `fc2`)
 - Mania-only tokens: gamemode, keycount, hold_note_ratio (other osu! tokens disabled)
 
 ### Resuming from a checkpoint
