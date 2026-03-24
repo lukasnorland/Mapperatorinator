@@ -103,9 +103,11 @@ python osuT5/train.py --config-name snapbeat_lora \
 
 - Pretrained: `OliBomby/Mapperatorinator-v31` with LoRA (r=64, alpha=128, PiSSA init, targets: q/k/v/out_proj + fc1/fc2)
 - 456 total samples: 410 train / 46 test
-- Optimizer: Muon, lr=2e-4/1e-4, batch=16, grad_acc=8
-- 1000 total steps, eval every 200, checkpoint every 500
-- DT augmentation: prob=0.15, speed range [1.1, 1.4]
+- Optimizer: Muon, lr=2e-4/1e-4, batch=128, grad_acc=64
+- 2000 total steps, 200 warmup, eval every 200, checkpoint every 500
+- `rhythm_weight: 5.0` (upweights TIME_SHIFT tokens in loss for timing accuracy)
+- `label_smoothing: 0.05` (helps timing generalization)
+- DT augmentation: disabled (`dt_augment_prob: 0.0`) — SnapBeat charts have fixed BPM
 - Timing context enabled: `add_timing`, `add_timing_points`, `add_snapping` (provides BPM and beat structure)
 - `timing_random_offset: 0` (no jitter on timing labels for exact-match accuracy)
 - LoRA targets: attention projections + feedforward layers (`fc1`, `fc2`)
@@ -157,3 +159,20 @@ Hydra changes the working directory to `logs/...` at startup, so relative paths 
 ### Windows: training hangs at epoch boundaries
 
 Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when a new epoch restarts the iterator. SnapBeat dataloaders use `persistent_workers=False` automatically. If training still hangs, use `dataloader.num_workers=0`.
+
+
+---
+
+## Changelog
+
+### 2026-03-24 — Timing accuracy improvements (Run 5 config)
+
+Changes to `configs/train/snapbeat_lora.yaml` targeting timing accuracy (plateaued at ~62.7% in Run 4):
+
+| Setting | Before | After | Rationale |
+|---------|--------|-------|-----------|
+| `data.rhythm_weight` | 3.0 (inherited default) | 5.0 | Upweights TIME_SHIFT tokens in cross-entropy loss so the model prioritizes timing predictions |
+| `data.label_smoothing` | 0.0 (inherited default) | 0.05 | Helps the model generalize timing predictions instead of overfitting exact offsets |
+| `data.dt_augment_prob` | 0.15 | 0.0 | SnapBeat charts have fixed BPM; DT augmentation adds noise to timing signal |
+| `optim.total_steps` | 1000 | 2000 | Run 3 was still improving at step 500 but Run 4 stalled because cosine LR had decayed to 0. Fresh 2000-step schedule gives more room to converge |
+| `optim.warmup_steps` | 100 | 200 | Scaled proportionally with total_steps |

@@ -50,7 +50,9 @@ data:
   add_pre_tokens: false
   add_empty_sequences: true
   types_first: true
-  dt_augment_prob: 0.15
+  rhythm_weight: 5.0            # default 3.0 — upweight timing tokens in loss
+  label_smoothing: 0.05         # slight smoothing to help timing generalization
+  dt_augment_prob: 0.0          # disable DT augment — SnapBeat has fixed BPM, this just adds noise
   dt_augment_range: [1.1, 1.4]
   timing_random_offset: 0
   context_types:
@@ -64,8 +66,8 @@ optim:
   base_lr_2: 0.0001
   batch_size: 128
   grad_acc: 64
-  total_steps: 1000
-  warmup_steps: 100
+  total_steps: 2000
+  warmup_steps: 200
   lr_scheduler: cosine
   final_cosine: 0
 
