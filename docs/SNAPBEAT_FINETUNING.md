@@ -134,7 +134,16 @@ python snapbeat_inference.py audio_path="song.mp3" gamemode=3 keycount=4
 
 This generates an .osu file via the standard pipeline, then converts to SnapBeat JSON using `snapbeat_converter.py`.
 
-To use a fine-tuned LoRA checkpoint, pass `lora_path` pointing to the `/lora` subdirectory inside a checkpoint:
+To use the fine-tuned LoRA checkpoint from HuggingFace (works on any machine):
+
+```bash
+python snapbeat_inference.py \
+  audio_path="song.mp3" \
+  lora_path="luannnguyen/snapbeat-lora-v5" \
+  gamemode=3 keycount=4 difficulty=5.0
+```
+
+Or with a local checkpoint path (if training logs are available):
 
 ```bash
 python snapbeat_inference.py \
@@ -152,7 +161,7 @@ python inference.py \
   audio_path="song.mp3" \
   output_path="./output/" \
   model_path="OliBomby/Mapperatorinator-v31" \
-  lora_path="logs/2026-03-24/21-31-48/checkpoint-2001/lora" \
+  lora_path="luannnguyen/snapbeat-lora-v5" \
   gamemode=3 difficulty=5.0
 ```
 
@@ -160,8 +169,8 @@ python inference.py \
 
 | Checkpoint | Timing Acc | Fuzzy Timing | Notes |
 |------------|-----------|--------------|-------|
-| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | **Best** — Run 5 (rhythm_weight=5, label_smoothing=0.05) |
-| `logs/2026-03-24/21-31-48/checkpoint-2000/lora` | 64.6% | 85.0% | Same as 2001 (final scheduled checkpoint) |
+| `luannnguyen/snapbeat-lora-v5` | 64.6% | 85.0% | **Best** — Run 5, hosted on HuggingFace |
+| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | Same as above (local path) |
 | `logs/2026-03-24/11-48-22/checkpoint-1001/lora` | 62.7% | 84.5% | Run 4 (resumed from Run 3) |
 | `logs/2026-03-23/17-09-07/checkpoint-500/lora` | 62.3% | 84.3% | Run 3 (first add_timing run) |
 
