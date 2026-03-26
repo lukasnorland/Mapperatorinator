@@ -94,6 +94,37 @@ All runs use `train=snapbeat_lora` config with `OliBomby/Mapperatorinator-v31` a
 
 ---
 
+## Run 5: 2026-03-24 21:31 (Steps 0–2001, fresh training)
+
+- **Log**: `logs/2026-03-24/21-31-48/`
+- **Dataset**: `datasets/dataset`
+- **Config overrides**: none
+- **Notable config changes vs Run 3/4**:
+  - `rhythm_weight=5.0` (was 3.0) — upweight TIME_SHIFT tokens in loss
+  - `label_smoothing=0.05` (was 0.0) — slight smoothing for timing generalization
+  - `dt_augment_prob=0.0` (was 0.15) — disabled, SnapBeat has fixed BPM
+  - `total_steps=2000` (fresh run, not resumed)
+
+### Eval Results
+
+| Step | Loss   | Timing Acc | Fuzzy Timing | Other Acc | Column Acc |
+|------|--------|-----------|--------------|-----------|------------|
+| 200  | 2.763  | 51.6%     | 80.0%        | 89.4%     | 63.6%      |
+| 400  | 2.479  | 57.8%     | 82.7%        | 90.5%     | 66.5%      |
+| 600  | 2.339  | 60.3%     | 83.8%        | 91.0%     | 67.2%      |
+| 800  | 2.266  | 62.0%     | 84.3%        | 91.1%     | 67.3%      |
+| 1000 | 2.210  | 63.1%     | 84.7%        | 91.3%     | 67.6%      |
+| 1200 | 2.196  | 63.8%     | 84.9%        | 91.2%     | 67.7%      |
+| 1400 | 2.184  | 64.5%     | 84.9%        | 91.2%     | 67.9%      |
+| 1600 | 2.180  | 64.4%     | 85.0%        | 91.3%     | 67.9%      |
+| 1800 | 2.180  | 64.6%     | 85.0%        | 91.3%     | 67.9%      |
+| 2000 | 2.178  | 64.6%     | 85.0%        | 91.3%     | 67.9%      |
+| 2001 | 2.178  | 64.6%     | 85.0%        | 91.3%     | 67.9%      |
+
+> Best timing accuracy: 64.6% at step 1800–2001. Plateaued after step ~1400. Test loss not directly comparable to earlier runs due to `rhythm_weight=5` and `label_smoothing=0.05`.
+
+---
+
 ## Summary Comparison (Best Eval per Run)
 
 | Run | Steps | Loss   | Timing Acc | Fuzzy Timing | Other Acc | Column Acc |
@@ -102,6 +133,9 @@ All runs use `train=snapbeat_lora` config with `OliBomby/Mapperatorinator-v31` a
 | 2   | 2001  | 0.7513 | 48.5%     | 82.6%        | 90.9%     | 67.3%      |
 | 3   | 500   | 0.6572 | 62.3%     | 84.3%        | 91.3%     | 67.3%      |
 | 4   | 1000  | 0.6978 | 62.7%     | 84.5%        | 91.2%     | 67.5%      |
+| 5   | 2001  | 2.178* | 64.6%     | 85.0%        | 91.3%     | 67.9%      |
+
+\* Run 5 loss not directly comparable due to `rhythm_weight=5` and `label_smoothing=0.05`.
 
 ### Key Takeaways
 
@@ -110,3 +144,35 @@ All runs use `train=snapbeat_lora` config with `OliBomby/Mapperatorinator-v31` a
 3. **Reducing `dt_augment_prob`** from 0.3 to 0.15 and setting `timing_random_offset=0` likely reduced noise in timing data.
 4. Run 3+4 achieved in 1000 steps what Run 2 couldn't in 2000 steps, showing config matters more than training length.
 5. Most gains happened in the first 500 steps of Run 3; the 500→1000 continuation (Run 4) added only ~0.4pp timing accuracy.
+6. **Run 5** pushed timing accuracy to **64.6%** (+1.9pp over Run 4) with `rhythm_weight=5`, `label_smoothing=0.05`, and `dt_augment_prob=0.0`. Gains were diminishing — most improvement came by step 1000, with only +1.5pp from 1000→2000.
+
+---
+
+## Next Steps: Improvement Suggestions
+
+The gap between timing_acc (64.6%) and fuzzy_timing_acc (85.0%) shows ~20% of predictions are off by just 1-2 steps (0.1-0.2ms). The model understands rhythm well but lacks precision — pointing toward regularization and richer context as the most promising directions.
+
+### High Impact
+
+| # | Suggestion | Rationale | Config change |
+|---|-----------|-----------|---------------|
+| 1 | **More training data** | 410 samples is the biggest bottleneck. Every config trick has diminishing returns on a tiny dataset. Even 2-3x more charts would likely beat any hyperparameter change. | Add more charts to `datasets/dataset/json/` and `audio/`, update `train_dataset_end`/`test_dataset_end` |
+| 2 | **Context type: `timing` -> `map`** | Currently the model gets no input context (audio only). Feeding BPM/timing points as decoder input gives explicit rhythmic structure to anchor predictions on — free information currently withheld. | `context_types: [{in: [timing], out: [map]}]` |
+| 3 | **Timing offset augmentation** | Creates cheap data variations by jittering note times by +/-1 step (+/-0.1ms). Helps the model generalize instead of memorizing exact offsets from 410 samples. | `timing_random_offset: 1` |
+
+### Medium Impact
+
+| # | Suggestion | Rationale | Config change |
+|---|-----------|-----------|---------------|
+| 4 | **Increase label smoothing** | More smoothing prevents overfitting to exact timing values on a small dataset. | `label_smoothing: 0.1` (from 0.05) |
+| 5 | **Increase LoRA dropout** | More regularization for a small dataset — the model may be memorizing rather than generalizing. | `lora_dropout: 0.1-0.15` (from 0.05) |
+| 6 | **Reduce effective batch size** | With 410 samples, each epoch is tiny relative to batch. Halving grad_acc doubles gradient updates per epoch for more diverse parameter updates. | `grad_acc: 32` (from 64) |
+| 7 | **Lower LR + more steps** | Slower, steadier convergence on small data. Run 5 plateaued at step ~1400; a lower LR might find a better minimum. | `base_lr: 0.0001, base_lr_2: 0.00005, total_steps: 4000` |
+
+### Lower Impact / Experimental
+
+| # | Suggestion | Rationale | Config change |
+|---|-----------|-----------|---------------|
+| 8 | **Reduce LoRA rank** | Less capacity = less overfitting risk. Rank 64 may be overkill for 410 samples. | `lora.r: 32` (from 64) |
+| 9 | **Snapping augmentation** | Randomly perturb snapping values during training for robustness. | `snapping_random_prob: 0.1` |
+| 10 | **Multi-context training** | Train with both `[timing] -> [map]` and `[none] -> [map]` so the model learns both modes. | Add second entry to `context_types` and `context_weights` |

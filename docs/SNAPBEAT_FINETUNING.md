@@ -134,7 +134,36 @@ python snapbeat_inference.py audio_path="song.mp3" gamemode=3 keycount=4
 
 This generates an .osu file via the standard pipeline, then converts to SnapBeat JSON using `snapbeat_converter.py`.
 
-To use a fine-tuned LoRA checkpoint, point to the adapter directory.
+To use a fine-tuned LoRA checkpoint, pass `lora_path` pointing to the `/lora` subdirectory inside a checkpoint:
+
+```bash
+python snapbeat_inference.py \
+  audio_path="song.mp3" \
+  lora_path="logs/2026-03-24/21-31-48/checkpoint-2001/lora" \
+  gamemode=3 keycount=4 difficulty=5.0
+```
+
+The base model (`OliBomby/Mapperatorinator-v31`) is loaded from the default `configs/inference/v31.yaml` config. The LoRA weights are merged at load time.
+
+You can also use the general inference script directly:
+
+```bash
+python inference.py \
+  audio_path="song.mp3" \
+  output_path="./output/" \
+  model_path="OliBomby/Mapperatorinator-v31" \
+  lora_path="logs/2026-03-24/21-31-48/checkpoint-2001/lora" \
+  gamemode=3 difficulty=5.0
+```
+
+**Available checkpoints** (see [SNAPBEAT_TRAINING_RESULTS.md](SNAPBEAT_TRAINING_RESULTS.md) for full eval metrics):
+
+| Checkpoint | Timing Acc | Fuzzy Timing | Notes |
+|------------|-----------|--------------|-------|
+| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | **Best** — Run 5 (rhythm_weight=5, label_smoothing=0.05) |
+| `logs/2026-03-24/21-31-48/checkpoint-2000/lora` | 64.6% | 85.0% | Same as 2001 (final scheduled checkpoint) |
+| `logs/2026-03-24/11-48-22/checkpoint-1001/lora` | 62.7% | 84.5% | Run 4 (resumed from Run 3) |
+| `logs/2026-03-23/17-09-07/checkpoint-500/lora` | 62.3% | 84.3% | Run 3 (first add_timing run) |
 
 ---
 
@@ -164,6 +193,19 @@ Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when 
 ---
 
 ## Changelog
+
+### 2026-03-26 — Run 5 training complete
+
+Run 5 finished 2000 steps (19 epochs). Final eval results:
+
+| Metric | Run 4 (best prior) | Run 5 | Delta |
+|--------|-------------------|-------|-------|
+| Timing Acc | 62.7% | 64.6% | +1.9pp |
+| Fuzzy Timing | 84.5% | 85.0% | +0.5pp |
+| Other Acc | 91.2% | 91.3% | +0.1pp |
+| Column Acc | 67.5% | 67.9% | +0.4pp |
+
+Best checkpoint: `logs/2026-03-24/21-31-48/checkpoint-2001/lora`. Gains were diminishing after step ~1400. See [SNAPBEAT_TRAINING_RESULTS.md](SNAPBEAT_TRAINING_RESULTS.md) for full step-by-step eval.
 
 ### 2026-03-24 — Timing accuracy improvements (Run 5 config)
 
