@@ -42,7 +42,7 @@ If your audio lives in a separate directory, set `data.snapbeat_audio_path` to t
 
 | Component | File | Role |
 |-----------|------|------|
-| Parser | `osuT5/osuT5/dataset/snapbeat_parser.py` | SnapBeat JSON → `(events, event_times)` using mania EventTypes |
+| Parser | `osuT5/osuT5/dataset/snapbeat_parser.py` | SnapBeat JSON → `(events, event_times)` using mania EventTypes; `parse_timing()` generates beat grid from BPM |
 | Dataset | `osuT5/osuT5/dataset/snapbeat_dataset.py` | Loads audio + chart pairs, builds training samples |
 | Model wiring | `osuT5/osuT5/utils/model_utils.py` | Routes `dataset_type=snapbeat` to SnapBeatDataset/Parser |
 | Config | `configs/train/snapbeat_lora.yaml` | LoRA fine-tuning config (456-chart `datasets/dataset` split) |
@@ -102,14 +102,15 @@ python osuT5/train.py --config-name snapbeat_lora \
 ### Config highlights (`snapbeat_lora.yaml`)
 
 - Pretrained: `OliBomby/Mapperatorinator-v31` with LoRA (r=64, alpha=128, PiSSA init, targets: q/k/v/out_proj + fc1/fc2)
-- 456 total samples: 410 train / 46 test
-- Optimizer: Muon, lr=2e-4/1e-4, batch=128, grad_acc=64
+- 669 total samples: 602 train / 67 test
+- Optimizer: Muon, lr=2e-4/1e-4, batch=64, grad_acc=64
 - 2000 total steps, 200 warmup, eval every 200, checkpoint every 500
 - `rhythm_weight: 5.0` (upweights TIME_SHIFT tokens in loss for timing accuracy)
 - `label_smoothing: 0.05` (helps timing generalization)
 - DT augmentation: disabled (`dt_augment_prob: 0.0`) — SnapBeat charts have fixed BPM
-- Timing context enabled: `add_timing`, `add_timing_points`, `add_snapping` (provides BPM and beat structure)
-- `timing_random_offset: 0` (no jitter on timing labels for exact-match accuracy)
+- Timing context: `context_types: timing→map` — decoder receives BPM/beat grid as input via `SnapBeatParser.parse_timing()`
+- Timing features enabled: `add_timing`, `add_timing_points`, `add_snapping` (provides BPM and beat structure in encoder)
+- `timing_random_offset: 0` (jitter hurts exact timing — Run 7 confirmed -9pp)
 - LoRA targets: attention projections + feedforward layers (`fc1`, `fc2`)
 - Mania-only tokens: gamemode, keycount, hold_note_ratio (other osu! tokens disabled)
 
@@ -167,12 +168,14 @@ python inference.py \
 
 **Available checkpoints** (see [SNAPBEAT_TRAINING_RESULTS.md](SNAPBEAT_TRAINING_RESULTS.md) for full eval metrics):
 
-| Checkpoint | Timing Acc | Fuzzy Timing | Notes |
-|------------|-----------|--------------|-------|
-| `luannnguyen/snapbeat-lora-v5` | 64.6% | 85.0% | **Best** — Run 5, hosted on HuggingFace |
-| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | Same as above (local path) |
-| `logs/2026-03-24/11-48-22/checkpoint-1001/lora` | 62.7% | 84.5% | Run 4 (resumed from Run 3) |
-| `logs/2026-03-23/17-09-07/checkpoint-500/lora` | 62.3% | 84.3% | Run 3 (first add_timing run) |
+| Checkpoint | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Notes |
+|------------|-----------|--------------|-----------|------------|-------|
+| `logs/2026-04-07/15-31-50/checkpoint-2001/lora` | 64.5% | 84.6% | **92.6%** | **69.2%** | **Best column/other** — Run 6, 603 train samples |
+| `luannnguyen/snapbeat-lora-v5` | **64.6%** | **85.0%** | 91.3% | 67.9% | **Best timing** — Run 5, hosted on HuggingFace |
+| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | 91.3% | 67.9% | Same as above (local path) |
+| `logs/2026-04-09/14-48-24/checkpoint-4001/lora` | 55.4% | 84.5% | 92.5% | 69.2% | Run 7 — timing_offset=1 hurt timing |
+| `logs/2026-03-24/11-48-22/checkpoint-1001/lora` | 62.7% | 84.5% | 91.2% | 67.5% | Run 4 (resumed from Run 3) |
+| `logs/2026-03-23/17-09-07/checkpoint-500/lora` | 62.3% | 84.3% | 91.3% | 67.3% | Run 3 (first add_timing run) |
 
 ---
 
@@ -202,6 +205,39 @@ Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when 
 ---
 
 ## Changelog
+
+### 2026-04-13 — Run 7 results + timing context implementation
+
+Run 7 finished 4000 steps (25 epochs). Three changes were tested simultaneously:
+
+| Change | Result | Verdict |
+|--------|--------|---------|
+| `timing_random_offset=1` | -9.1pp exact timing, 0pp fuzzy | **Harmful** — reverted to 0 |
+| `context_types: timing→map` | No effect (code path didn't exist) | **Fixed** — see below |
+| Lower LR (0.0001) + 4000 steps | No improvement over 0.0002/2000 | **Unnecessary** — reverted |
+
+Post-Run 7 implementation: `SnapBeatParser.parse_timing()` now generates TIMING_POINT/MEASURE/BEAT events from chart BPM metadata. `SnapBeatDataset._process_chart()` detects `ContextType.TIMING` in the config and feeds the beat grid to the decoder as input context. This was the intended architectural change for Run 7 but the dataset code didn't support it — now it does.
+
+Also fixed: `test.py` now supports `lora_path` config for evaluating LoRA checkpoints against the base model, and handles tensorboard-only runs (no wandb crash).
+
+Config reverted to Run 6 settings + timing context for Run 8: `timing_random_offset=0`, `base_lr=0.0002`, `total_steps=2000`, `context_types: timing→map`.
+
+### 2026-04-09 — Run 6 training complete (expanded dataset)
+
+Run 6 finished 2000 steps (13 epochs) with 47% more training data (603 train / 67 test, up from 410/46). Final eval results:
+
+| Metric | Run 5 (best prior) | Run 6 | Delta |
+|--------|-------------------|-------|-------|
+| Timing Acc | 64.6% | 64.5% | -0.1pp |
+| Fuzzy Timing | 85.0% | 84.6% | -0.4pp |
+| Other Acc | 91.3% | 92.6% | **+1.3pp** |
+| Column Acc | 67.9% | 69.2% | **+1.3pp** |
+
+Key finding: more data significantly improved note placement (column +1.3pp, other +1.3pp) but timing accuracy is unchanged. This confirms timing precision is not data-limited — it requires architectural changes (feeding BPM/timing context to the decoder, timing augmentation) rather than more samples. See [SNAPBEAT_TRAINING_RESULTS.md](SNAPBEAT_TRAINING_RESULTS.md) for updated improvement suggestions.
+
+Config changes: `compile=false` (Triton unavailable), `batch_size=64, grad_acc=64` (12GB VRAM constraint), dataset split updated to 603/67. One corrupt audio file (`7f65a210-...wav`) was skipped during training.
+
+Best checkpoint: `logs/2026-04-07/15-31-50/checkpoint-2001/lora`.
 
 ### 2026-03-26 — Run 5 training complete
 

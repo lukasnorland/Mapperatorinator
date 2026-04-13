@@ -15,9 +15,9 @@ data:
   test_dataset_path: "./datasets/dataset"
   snapbeat_audio_path: ""
   train_dataset_start: 0
-  train_dataset_end: 410
-  test_dataset_start: 410
-  test_dataset_end: 456
+  train_dataset_end: 602
+  test_dataset_start: 602
+  test_dataset_end: 669
   gamemodes: [3]
   per_track: true
   # Disable osu!-specific features not relevant to SnapBeat
@@ -54,9 +54,9 @@ data:
   label_smoothing: 0.05         # slight smoothing to help timing generalization
   dt_augment_prob: 0.0          # disable DT augment — SnapBeat has fixed BPM, this just adds noise
   dt_augment_range: [1.1, 1.4]
-  timing_random_offset: 0
+  timing_random_offset: 0              # jitter hurts exact timing (Run 7: -9pp) — keep off
   context_types:
-    - "in": ['${context_type:none}']
+    - "in": ['${context_type:timing}']
       "out": ['${context_type:map}']
   context_weights: [1]
 
@@ -64,7 +64,7 @@ optim:
   name: muon
   base_lr: 0.0002
   base_lr_2: 0.0001
-  batch_size: 128
+  batch_size: 64
   grad_acc: 64
   total_steps: 2000
   warmup_steps: 200

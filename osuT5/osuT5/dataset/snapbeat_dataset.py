@@ -164,15 +164,37 @@ class SnapBeatDataset(IterableDataset):
                 "scroll_speed_ratio": 0.0,
             },
         }]
-        in_context = [{
-            "events": [],
-            "event_times": [],
-            "extra": {
-                "context_type": ContextType.NONE,
-                "add_type": True,
-                "id": "in_none",
-            },
-        }]
+        # Determine input context type from config
+        in_context_type = ContextType.NONE
+        if self.args.context_types:
+            ct = self.args.context_types[0]
+            if not isinstance(ct, str) and "in" in ct:
+                in_types = ct["in"]
+                if in_types and in_types[0] == ContextType.TIMING:
+                    in_context_type = ContextType.TIMING
+
+        if in_context_type == ContextType.TIMING:
+            timing_events, timing_event_times = self.parser.parse_timing(
+                chart, speed, song_length_ms=song_length * 1000)
+            in_context = [{
+                "events": timing_events,
+                "event_times": timing_event_times,
+                "extra": {
+                    "context_type": ContextType.TIMING,
+                    "add_type": True,
+                    "id": "in_timing",
+                },
+            }]
+        else:
+            in_context = [{
+                "events": [],
+                "event_times": [],
+                "extra": {
+                    "context_type": ContextType.NONE,
+                    "add_type": True,
+                    "id": "in_none",
+                },
+            }]
 
         extra_data = {
             "beatmap_idx": torch.tensor(self.tokenizer.num_classes, dtype=torch.long),

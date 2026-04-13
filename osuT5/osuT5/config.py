@@ -220,6 +220,7 @@ class TrainConfig:
     seed: int = 42
     checkpoint_path: str = ""
     pretrained_path: str = ""
+    lora_path: str = ""
     pretrained_t5_compat: bool = False
     enable_lora: bool = False
     lora: dict = field(default_factory=lambda: {})

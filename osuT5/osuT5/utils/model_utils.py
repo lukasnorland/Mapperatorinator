@@ -132,6 +132,7 @@ def load_model(
         attn_implementation: str = "sdpa",
         eval_mode: bool = True,
         pickle_module=None,
+        lora_path=None,
 ):
     model_loader, tokenizer_loader = load_model_loaders(
         ckpt_path_str,
@@ -141,6 +142,7 @@ def load_model(
         attn_implementation,
         eval_mode,
         pickle_module,
+        lora_path=lora_path,
     )
     return model_loader(), tokenizer_loader()
 
@@ -360,6 +362,7 @@ def get_dataloaders(tokenizer: Tokenizer, args: TrainConfig, shared: Namespace) 
         parser = SnapBeatParser(
             types_first=args.data.types_first,
             add_snapping=args.data.add_snapping,
+            add_timing_points=args.data.add_timing_points,
             sustain_interval=args.data.sustain_interval,
         )
     else:

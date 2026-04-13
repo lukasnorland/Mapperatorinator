@@ -20,9 +20,10 @@ class SnapBeatParser:
     """
 
     def __init__(self, *, types_first: bool = True, add_snapping: bool = True,
-                 sustain_interval: Optional[int] = None):
+                 add_timing_points: bool = True, sustain_interval: Optional[int] = None):
         self.types_first = types_first
         self.add_snapping = add_snapping
+        self.add_timing_points = add_timing_points
         self.sustain_interval = sustain_interval
 
     def parse(self, chart: dict, speed: float = 1.0) -> tuple[list[Event], list[int]]:
@@ -70,6 +71,69 @@ class SnapBeatParser:
         if len(events) > 0:
             events, event_times = zip(*sorted(zip(events, event_times), key=lambda x: x[1]))
             events, event_times = list(events), list(event_times)
+
+        if speed != 1.0:
+            events, event_times = self._apply_speed(events, event_times, speed)
+
+        return events, event_times
+
+    def parse_timing(self, chart: dict, speed: float = 1.0, song_length_ms: Optional[float] = None) -> tuple[list[Event], list[int]]:
+        """Generate TIMING_POINT / MEASURE / BEAT events from the chart's BPM.
+
+        SnapBeat charts have a single BPM and assumed 4/4 meter.  This produces
+        the same event format as ``OsuParser.parse_timing`` so the model receives
+        an explicit beat grid as decoder input context.
+
+        Args:
+            chart: Parsed SnapBeat JSON dict.
+            speed: Speed multiplier (for DT augmentation).
+            song_length_ms: Song duration in ms (used as upper bound for beats).
+
+        Returns:
+            Tuple of (events, event_times) sorted by time.
+        """
+        song_meta = chart.get("songMeta", {})
+        bpm = song_meta.get("bpm", 120.0)
+        ms_per_beat = 60_000.0 / bpm if bpm > 0 else 500.0
+        meter = 4  # SnapBeat assumes 4/4
+
+        # Determine how far to generate beats
+        notes = chart.get("notes", [])
+        if notes:
+            last_time = max(n.get("time", 0.0) for n in notes) * 1000 + 1
+        elif song_length_ms is not None:
+            last_time = song_length_ms
+        else:
+            last_time = 10
+
+        events: list[Event] = []
+        event_times: list[int] = []
+        measure_counter = 0
+        time = 0.0
+
+        while time <= last_time:
+            time_ms = int(time + 0.5)
+
+            if self.add_timing_points and measure_counter == 0:
+                event_type = EventType.TIMING_POINT
+            elif measure_counter % meter == 0:
+                event_type = EventType.MEASURE
+            else:
+                event_type = EventType.BEAT
+
+            if self.types_first:
+                events.append(Event(event_type))
+                event_times.append(time_ms)
+
+            events.append(Event(EventType.TIME_SHIFT, time_ms))
+            event_times.append(time_ms)
+
+            if not self.types_first:
+                events.append(Event(event_type))
+                event_times.append(time_ms)
+
+            measure_counter += 1
+            time = measure_counter * ms_per_beat
 
         if speed != 1.0:
             events, event_times = self._apply_speed(events, event_times, speed)

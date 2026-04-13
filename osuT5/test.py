@@ -187,12 +187,15 @@ def test(args: TrainConfig, accelerator: Accelerator, model, tokenizer, preprefi
                 y_name = f"{prefix}/{y_name}"
 
             bin_accs = bin_totals / bin_counts
-            wandb.define_metric(y_name, step_metric=x_name)
+            try:
+                wandb.define_metric(y_name, step_metric=x_name)
 
-            # Log the plot
-            for (bin_x, bin_acc) in zip(bins, bin_accs):
-                if not np.isnan(bin_acc):
-                    wandb.log({y_name: bin_acc, x_name: bin_x})
+                # Log the plot
+                for (bin_x, bin_acc) in zip(bins, bin_accs):
+                    if not np.isnan(bin_acc):
+                        wandb.log({y_name: bin_acc, x_name: bin_x})
+            except wandb.errors.errors.Error:
+                pass  # wandb not initialized (e.g. using tensorboard)
 
         for prefix in bin_totals.keys():
             prefixes = [preprefix, prefix]
@@ -248,6 +251,7 @@ def main(args: TrainConfig):
         # Ignore precision argument because that is handled by accelerator
         attn_implementation=args.attn_implementation,
         eval_mode=True,
+        lora_path=args.lora_path if args.lora_path else None,
     )
 
     # noinspection PyTypeChecker
