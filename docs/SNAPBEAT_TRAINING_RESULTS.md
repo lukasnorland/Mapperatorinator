@@ -183,6 +183,35 @@ Eval metrics were not logged during training (context type filter mismatch — e
 
 ---
 
+## Run 8: 2026-04-13 11:33 → 2026-04-15 19:56 (Steps 0–2001, fresh training; paused/resumed at step 1500)
+
+- **Log**: `logs/2026-04-13/11-33-50/` (steps 0–1500), resumed at `logs/2026-04-15/09-49-00/` (steps 1500–2001)
+- **Dataset**: `datasets/dataset` (669 total, 602 train / 67 test)
+- **Config overrides**: `compile=false`
+- **Notable config changes vs Run 6**:
+  - **Timing context to decoder is now active**: `context_types: [{in: [timing], out: [map]}]`. `SnapBeatParser.parse_timing()` emits TIMING_POINT/MEASURE/BEAT events from BPM and `SnapBeatDataset._process_chart()` feeds them as decoder input context (the change that was intended for Run 7 but silently no-opped).
+  - Same Run 6 training hyperparameters otherwise: `rhythm_weight=5.0`, `label_smoothing=0.05`, `timing_random_offset=0`, `base_lr=0.0002`, `total_steps=2000`, `batch_size=64`, `grad_acc=64`.
+
+### Eval Results
+
+| Step | Loss   | Timing Acc | Fuzzy Timing | Other Acc | Column Acc |
+|------|--------|-----------|--------------|-----------|------------|
+| 200  | 2.088  | 67.3%     | 82.4%        | 90.7%     | 65.1%      |
+| 400  | 1.803  | 72.2%     | 84.3%        | 92.0%     | 67.9%      |
+| 600  | 1.742  | 73.6%     | 84.9%        | 92.4%     | 68.5%      |
+| 800  | 1.707  | 74.3%     | 85.2%        | 92.6%     | 69.1%      |
+| 1000 | 1.679  | 74.8%     | 85.4%        | 92.7%     | 69.2%      |
+| 1200 | 1.670  | 75.0%     | 85.6%        | 92.7%     | 69.4%      |
+| 1400 | 1.669  | 75.1%     | 85.5%        | 92.8%     | 69.3%      |
+| 1600 | 1.658  | 75.2%     | 85.7%        | 92.8%     | 69.5%      |
+| 1800 | 1.657  | 75.2%     | 85.6%        | 92.8%     | 69.6%      |
+| 2000 | 1.658  | **75.3%** | 85.6%        | **92.8%** | **69.6%**  |
+| 2001 | 1.658  | **75.3%** | 85.6%        | **92.8%** | **69.6%**  |
+
+> **Breakthrough run.** Feeding the BPM beat grid to the decoder broke the 64.6% timing plateau, jumping timing accuracy by **+10.7pp** over Run 5 and **+10.8pp** over Run 6 — all other metrics also reached new bests. Timing accuracy crossed 67% by step 200 (where Run 5 was at 51.6%) and kept climbing. The 10pp gap to fuzzy_timing shrank to ~10.3pp (from ~20pp), indicating the model can now pick the exact step much more often.
+
+---
+
 ## Summary Comparison (Best Eval per Run)
 
 | Run | Steps | Loss   | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Notes |
@@ -191,9 +220,10 @@ Eval metrics were not logged during training (context type filter mismatch — e
 | 2   | 2001  | 0.7513 | 48.5%     | 82.6%        | 90.9%     | 67.3%      | |
 | 3   | 500   | 0.6572 | 62.3%     | 84.3%        | 91.3%     | 67.3%      | +timing, +fc1/fc2 |
 | 4   | 1000  | 0.6978 | 62.7%     | 84.5%        | 91.2%     | 67.5%      | resumed from Run 3 |
-| 5   | 2001  | 2.178* | **64.6%** | **85.0%**    | 91.3%     | 67.9%      | **best timing** |
-| 6   | 2001  | 2.144* | 64.5%     | 84.6%        | **92.6%** | **69.2%**  | **best column/other**, +47% data |
+| 5   | 2001  | 2.178* | 64.6%     | 85.0%        | 91.3%     | 67.9%      | prior best timing |
+| 6   | 2001  | 2.144* | 64.5%     | 84.6%        | 92.6%     | 69.2%      | +47% data |
 | 7   | 4001  | 0.717  | 55.4%     | 84.5%        | 92.5%     | 69.2%      | timing_offset=1 hurt, timing context was no-op |
+| 8   | 2001  | 1.658* | **75.3%** | **85.7%**    | **92.8%** | **69.6%**  | **best all metrics** — timing context in decoder |
 
 \* Runs 5–6 loss not directly comparable to earlier runs due to `rhythm_weight=5` and `label_smoothing=0.05`.
 
@@ -209,18 +239,19 @@ Eval metrics were not logged during training (context type filter mismatch — e
    - `timing_random_offset=1` **destroyed exact timing** (-9.1pp) while fuzzy timing was unchanged. The jitter makes the model imprecise.
    - `context_types: timing→map` had **no effect** because SnapBeatDataset hardcoded `ContextType.NONE` — the timing context was never actually fed to the decoder. Fixed post-Run 7.
    - Lower LR (0.0001) + 4000 steps provided **no benefit** over Run 6's settings (2000 steps, 0.0002 LR).
+8. **Run 8 broke the timing plateau.** With the decoder now receiving the BPM beat grid as input context (via the post-Run 7 fix), exact timing accuracy jumped from 64.6% → **75.3%** (+10.7pp) without any other config changes vs Run 6. Fuzzy timing, other_acc, and column_acc also reached new bests. This confirms the plateau was caused by the decoder lacking explicit beat-grid information, not by data or capacity limits.
 
 ---
 
 ## Next Steps: Improvement Suggestions
 
-Timing accuracy has plateaued at ~64.5% across Runs 5–6. The 20pp gap to fuzzy_timing_acc (84.6%) shows the model gets timing approximately right but can't pick the exact step. Run 7 ruled out jitter augmentation and lower LR as solutions. The remaining high-value change is feeding timing context to the decoder — now implemented correctly.
+Run 8 broke the timing plateau: exact timing accuracy is now **75.3%** (up from 64.6%). The gap to fuzzy_timing_acc (85.7%) has narrowed to ~10pp (from 20pp). Next experiments should push this further with tuning on top of Run 8's config.
 
-### High Impact (Run 8)
+### Tested and Confirmed
 
-| # | Suggestion | Rationale | Config change |
-|---|-----------|-----------|---------------|
-| 1 | **Feed timing context to decoder** | `SnapBeatParser.parse_timing()` now generates TIMING_POINT/MEASURE/BEAT events from BPM. `SnapBeatDataset` passes them as decoder input when `context_types: timing→map`. This gives the model an explicit beat grid to anchor timing predictions on. Was intended for Run 7 but the code path didn't exist — now implemented. | `context_types: [{in: [timing], out: [map]}]` (already set) |
+| # | Change | Result | Run |
+|---|--------|--------|-----|
+| 1 | **Feed BPM beat grid to decoder** (`context_types: timing→map` + `SnapBeatParser.parse_timing()`) | **+10.7pp exact timing** (64.6% → 75.3%), new bests on all metrics | Run 8 |
 
 ### Tested and Rejected
 
@@ -230,7 +261,7 @@ Timing accuracy has plateaued at ~64.5% across Runs 5–6. The 20pp gap to fuzzy
 | ~~3~~ | Lower LR (0.0001) + 4000 steps | No improvement over 0.0002 / 2000 steps | Run 7 |
 | ~~11~~ | More training data (+47%) | +1.3pp column/other, 0pp timing — not data-limited | Run 6 |
 
-### Medium Impact (after Run 8)
+### Medium Impact (after Run 8 — next run candidates)
 
 | # | Suggestion | Rationale | Config change |
 |---|-----------|-----------|---------------|
