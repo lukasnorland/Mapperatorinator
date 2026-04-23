@@ -34,11 +34,23 @@ from snapbeat_converter import osu_mania_to_snapbeat, write_snapbeat_json
 
 
 # ── Defaults for SnapBeat-specific settings ─────────────────────────────────
+# Note: `game_code` is now a real field on InferenceConfig (see config.py),
+# so it is read from `args.game_code` rather than popped off the DictConfig.
 _SNAPBEAT_DEFAULTS = {
     "snapbeat_song_name": "Generated",
     "snapbeat_visual_speed": 4.5,
     "snapbeat_max_simultaneous": 2,
 }
+
+# game_code -> default LoRA to load. Missing entries mean "no model yet"; add
+# BH/DR once those LoRAs are trained and pushed to HuggingFace.
+_GAME_CODE_REGISTRY = {
+    "MT3": "luannnguyen/snapbeat-lora-v8",
+    # "BH": "<your-org>/snapbeat-lora-bh-v1",
+    # "DR": "<your-org>/snapbeat-lora-dr-v1",
+}
+
+_ALLOWED_GAME_CODES = {"MT3", "BH", "DR"}
 
 
 def _pop_snapbeat_args(cfg: DictConfig) -> dict:
@@ -53,6 +65,32 @@ def _pop_snapbeat_args(cfg: DictConfig) -> dict:
 def main(cfg: DictConfig) -> None:
     sb_args = _pop_snapbeat_args(cfg)
     args: InferenceConfig = OmegaConf.to_object(cfg)
+
+    # Validate game_code and route lora_path from the registry if needed
+    game_code = str(args.game_code).upper()
+    if game_code not in _ALLOWED_GAME_CODES:
+        print(
+            f"ERROR: invalid game_code={args.game_code!r}; "
+            f"must be one of {sorted(_ALLOWED_GAME_CODES)}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    args.game_code = game_code
+
+    if not args.lora_path:
+        registered = _GAME_CODE_REGISTRY.get(game_code)
+        if registered is None:
+            print(
+                f"ERROR: no LoRA registered for game_code={game_code!r}. "
+                f"Registered codes: {sorted(_GAME_CODE_REGISTRY)}. "
+                f"Either train/register a LoRA for {game_code} or pass lora_path=... explicitly.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+        args.lora_path = registered
+        print(f"game_code={game_code}: using LoRA {registered!r}")
+    else:
+        print(f"game_code={game_code}: honoring explicit lora_path={args.lora_path!r}")
 
     # Force mania mode with sensible defaults for SnapBeat-style charts
     if args.gamemode is None:
@@ -103,6 +141,7 @@ def main(cfg: DictConfig) -> None:
         n_lanes=args.keycount,
         visual_speed=sb_args["snapbeat_visual_speed"],
         max_simultaneous=sb_args["snapbeat_max_simultaneous"],
+        game_code=args.game_code,
     )
 
     written = write_snapbeat_json(snapbeat, json_path)

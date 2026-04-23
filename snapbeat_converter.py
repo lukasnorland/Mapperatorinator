@@ -17,6 +17,7 @@ def osu_mania_to_snapbeat(
     n_lanes: int = 4,
     visual_speed: float = 4.5,
     max_simultaneous: int = 2,
+    game_code: str = "MT3",
 ) -> dict:
     """Convert an osu! mania .osu beatmap file to a SnapBeat-compliant dict.
 
@@ -27,6 +28,8 @@ def osu_mania_to_snapbeat(
         n_lanes: Number of playable lanes (written to songMeta.nLanes).
         visual_speed: Scroll speed written to songMeta.visualSpeed.
         max_simultaneous: Maximum simultaneous notes allowed per timestamp.
+        game_code: SnapBeat game code written to the top-level `format` field
+            (e.g. "MT3", "BH", "DR").
 
     Returns:
         A dict matching SnapBeat JSON v1.3 schema.
@@ -38,7 +41,7 @@ def osu_mania_to_snapbeat(
     hit_objects = beatmap.hit_objects(stacking=False)
 
     if not hit_objects:
-        return _empty_snapbeat(song_name, audio_path, bpm, n_lanes, visual_speed)
+        return _empty_snapbeat(song_name, audio_path, bpm, n_lanes, visual_speed, game_code)
 
     last_ho = hit_objects[-1]
     end_time = last_ho.end_time if isinstance(last_ho, HoldNote) else last_ho.time
@@ -51,7 +54,7 @@ def osu_mania_to_snapbeat(
 
     return {
         "version": "1.3",
-        "format": "MT3",
+        "format": game_code,
         "lastModified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": notes,
         "songMeta": {
@@ -207,10 +210,11 @@ def _try_reassign(
 
 def _empty_snapbeat(
     song_name: str, audio_path: str, bpm: float, n_lanes: int, visual_speed: float,
+    game_code: str = "MT3",
 ) -> dict:
     return {
         "version": "1.3",
-        "format": "MT3",
+        "format": game_code,
         "lastModified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": [],
         "songMeta": {

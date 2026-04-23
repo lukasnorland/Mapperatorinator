@@ -7,6 +7,7 @@ audio_path: ''          # Path to input audio
 output_path: ''         # Path to output directory
 beatmap_path: ''        # Path to .osu file to autofill metadata and use as reference
 lora_path: null           # Path to LoRA weights
+game_code: 'MT3'          # SnapBeat game code: MT3 | BH | DR (selects LoRA)
 
 # Conditional generation settings
 gamemode: null             # Gamemode of the beatmap

@@ -18,6 +18,7 @@ class InferenceConfig:
     output_path: Optional[str] = None  # Path to output directory
     beatmap_path: Optional[str] = None  # Path to .osu file to autofill metadata and use as reference
     lora_path: Optional[str] = None  # Path to LoRA weights
+    game_code: str = 'MT3'  # SnapBeat game code: MT3 | BH | DR (selects LoRA in snapbeat_inference.py)
 
     # Conditional generation settings
     gamemode: Optional[int] = None  # Gamemode of the beatmap
