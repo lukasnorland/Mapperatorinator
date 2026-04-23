@@ -105,8 +105,8 @@ python osuT5/train.py --config-name snapbeat_lora \
 - 669 total samples: 602 train / 67 test
 - Optimizer: Muon, lr=2e-4/1e-4, batch=64, grad_acc=64
 - 2000 total steps, 200 warmup, eval every 200, checkpoint every 500
-- `rhythm_weight: 5.0` (upweights TIME_SHIFT tokens in loss for timing accuracy)
-- `label_smoothing: 0.05` (helps timing generalization)
+- `rhythm_weight: 5.0` (upweights TIME_SHIFT tokens in loss for timing accuracy — Run 9 proved 8.0 underperforms 5.0)
+- `label_smoothing: 0.1` / `lora_dropout: 0.1` (current file state, Run 10). Run 10 showed 0.1/0.1 over-regularizes (-0.77pp vs Run 8's 0.05/0.05). Run 11 plan reverts both to **0.05** and tests `lora.r: 128` / `lora_alpha: 256` instead.
 - DT augmentation: disabled (`dt_augment_prob: 0.0`) — SnapBeat charts have fixed BPM
 - Timing context: `context_types: timing→map` — decoder receives BPM/beat grid as input via `SnapBeatParser.parse_timing()`
 - Timing features enabled: `add_timing`, `add_timing_points`, `add_snapping` (provides BPM and beat structure in encoder)
