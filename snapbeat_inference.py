@@ -45,9 +45,9 @@ _SNAPBEAT_DEFAULTS = {
 # game_code -> default LoRA to load. Missing entries mean "no model yet"; add
 # BH/DR once those LoRAs are trained and pushed to HuggingFace.
 _GAME_CODE_REGISTRY = {
-    "MT3": "luannnguyen/snapbeat-lora-v8",
-    # "BH": "<your-org>/snapbeat-lora-bh-v1",
-    # "DR": "<your-org>/snapbeat-lora-dr-v1",
+    "MT3": "lukasnorland/rhythm-skeleton-mt3",
+    # "BH": "lukasnorland/rhythm-skeleton-bh",
+    # "DR": "lukasnorland/rhythm-skeleton-dr",
 }
 
 _ALLOWED_GAME_CODES = {"MT3", "BH", "DR"}
