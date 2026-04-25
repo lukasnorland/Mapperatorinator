@@ -25,3 +25,4 @@ rich==14.2.0
 peft==0.18.1
 rosu-pp-py==3.1.0
 wandb==0.24.2
+redis==6.4.0

@@ -4,6 +4,7 @@ logs
 logs_fid
 multirun
 tensorboard_logs
+tmp
 .idea
 test
 test_inference.py
