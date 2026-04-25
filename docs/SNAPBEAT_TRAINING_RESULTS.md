@@ -268,22 +268,58 @@ Eval metrics were not logged during training (context type filter mismatch — e
 
 ---
 
-## Run 11: planned — test LoRA capacity
+## Run 11: 2026-04-23 09:13 → 2026-04-25 01:49 (Steps 0–2001, fresh training; completed)
 
-- **Config changes vs Run 8** (applied in `configs/train/snapbeat_lora.yaml` for the run):
+- **Log**: `logs/2026-04-23/09-12-54/` (checkpoints saved: 500, 1000, 1500, 2000, 2001)
+- **Dataset**: `datasets/dataset` (669 total, 602 train / 67 test)
+- **Config overrides**: `compile=false`
+- **Notable config changes vs Run 8**:
   - `lora.r: 64 → 128`
-  - `lora.lora_alpha: 128 → 256` (keep α/r = 2)
-  - Revert `label_smoothing: 0.1 → 0.05` (Run 8 value)
-  - Revert `lora_dropout: 0.1 → 0.05` (Run 8 value)
-  - Keep `rhythm_weight: 5.0`
-- **Rationale**: Run 9 tested "fit harder" (higher `rhythm_weight`) — worse. Run 10 tested "regularize more" — also worse. The remaining untested axis is **capacity**: Run 8 may be LoRA-rank-bottlenecked rather than data- or loss-bottlenecked. Doubling rank gives the adapter more dimensions to absorb the timing-conditional mapping without touching base weights. α doubles in step to keep effective scale (`α/r`) constant, so LR dynamics don't silently shift.
-- **Risk**: more parameters on 602 samples could overfit harder. Mitigation: keep Run 8's regularization (don't stack capacity + weaker reg), and watch train/test loss gap at step 1000–1400 — if it blows past Run 9's 5.3× before eval improves over Run 8, abort.
+  - `lora.lora_alpha: 128 → 256` (keep α/r = 2 so effective scale unchanged)
+  - Reverted `label_smoothing: 0.1 → 0.05` and `lora_dropout: 0.1 → 0.05` (Run 8 values, undoing Run 10's regularization)
+  - Kept `rhythm_weight: 5.0`
+- **Trainable params**: **51.9M** (2.00× Run 10's 25.95M); total 272.1M (frozen base unchanged at 220.2M).
+- **VRAM**: 7.8 GB / 12 GB (+256 MiB vs Run 10).
+- **Pre-registered hypothesis**: Run 8 may be LoRA-rank-bottlenecked; doubling rank gives the adapter more capacity to absorb the timing-conditional mapping. Final ≥76% = new baseline; 75.0–75.8% = marginal tie; <75% = capacity is not the bottleneck.
+
+### Eval Results
+
+| Step | Loss   | Timing Acc | Fuzzy Timing | Other Acc | Column Acc |
+|------|--------|-----------|--------------|-----------|------------|
+| 200  | 2.094  | 67.08%    | 82.55%       | 90.70%    | 65.11%     |
+| 400  | 1.832  | 72.07%    | 84.47%       | 92.21%    | 67.82%     |
+| 600  | 1.761  | 73.19%    | 85.03%       | 92.59%    | 68.54%     |
+| 800  | 1.723  | 74.23%    | 85.29%       | 92.59%    | 69.20%     |
+| 1000 | 1.707  | 74.64%    | 85.62%       | 92.81%    | 69.41%     |
+| 1200 | 1.695  | 74.72%    | 85.65%       | 92.82%    | 69.44%     |
+| 1400 | 1.688  | 74.90%    | 85.77%       | 92.76%    | 69.56%     |
+| 1600 | 1.675  | 75.09%    | 85.79%       | 92.87%    | 69.63%     |
+| 1800 | 1.673  | **75.17%** (peak) | **85.83%** | 92.83% | **69.64%** |
+| 2000 | 1.673  | 75.12%    | 85.84%       | 92.81%    | 69.63%     |
+| 2001 | 1.673  | 75.12%    | 85.84%       | 92.81%    | 69.63%     |
+
+> **Capacity hypothesis essentially rejected — tied Run 8 within noise.** Final 75.12% landed **0.18pp below Run 8's 75.3%**; peak (75.17% at step 1800) was 0.13pp short. Train/test gap stayed clean (~0.45 / 1.67 ≈ 3.7×) — no overfitting, just a hard accuracy ceiling. The step 1000 pre-reg gate (≥75%) was missed by 0.36pp but the run was let to finish for a clean comparison number. Run 11 did beat Run 10 by **+0.59pp** (74.53% → 75.12%), confirming r=128 is *slightly* better than r=64 + over-regularization, but doubling trainable params (26M → 52M) for a tied result with Run 8 isn't a net win. **Run 8 remains champion.** All three single-axis sweeps after Run 8 (loss-weighting in Run 9, regularization in Run 10, capacity in Run 11) failed to beat it — the plateau is now very likely a **data ceiling** at 602 train samples with this hyperparameter family.
+
+---
+
+## Run 12: planned — Run 8 resume with low-LR tail
+
+- **Resume from**: `logs/2026-04-13/11-33-50/checkpoint-2000` (Run 8 final) — *or* the resumed-tail checkpoint at `logs/2026-04-15/09-49-00/checkpoint-2000` (whichever has the cleanest optimizer state).
+- **Config changes vs Run 8**:
+  - `optim.base_lr: 0.0002 → 0.00005` (1/4 of Run 8's LR)
+  - `optim.base_lr_2: 0.0001 → 0.000025`
+  - `optim.warmup_steps: 200 → 50` (short warmup since model already converged)
+  - `optim.total_steps: 2000 → 1000` (or 500 if cosine tail decays fast)
+  - Everything else identical to Run 8 (`r=64`, `α=128`, `rhythm_weight=5`, `label_smoothing=0.05`, `lora_dropout=0.05`, timing context active).
+- **Rationale**: Runs 9/10/11 each varied one axis from Run 8 and all underperformed. The remaining cheap test is **schedule**: Run 8's cosine LR ended at 0 over 2000 steps with `base_lr=2e-4`, but the eval curve was still improving (+0.1pp from step 1800 → 2001). Continuing with a small LR may polish the existing solution without disturbing it. This is also the cheapest experiment left — only 500–1000 extra steps (~1–2 days on RTX A2000).
+- **Risk**: `base_lr=5e-5` could be too small to escape the local optimum, in which case it just adds drift around 75.3%. Mitigation: short cosine schedule with warmup ensures we don't hard-jolt the loaded weights.
 - **Pre-registered expectation**:
-  - Step 200 timing_acc ≥ 67% (match or beat Run 8's 67.3%) — early read on whether capacity is helping.
-  - Step 1000 timing_acc ≥ 75% (Run 8 was at 74.8% at step 1000) — would justify completing the run.
-  - Final timing_acc ≥ 76% would make Run 11 the new baseline; 75.0–75.8% = marginal; <75% = capacity is not the bottleneck and the 602-sample dataset is the ceiling.
-- **VRAM check needed before launch**: r=128 doubles LoRA params (~52M trainable vs ~26M). Current run uses 7.5 GB / 12 GB; likely fits, but first step should be confirmed before leaving unattended.
-- **Fallback if Run 11 fails**: resume from Run 8's `checkpoint-2000` with `base_lr=5e-5`, ~500 additional steps — refines the existing best instead of re-searching.
+  - Step 200 timing_acc ≥ **75.3%** — must at minimum hold Run 8's level (continuing should not make it worse). If it drops below 75% at step 200, kill — LR is too high or checkpoint loaded incorrectly.
+  - Step 500 timing_acc ≥ **75.5%** — early signal that LR annealing helps.
+  - Final timing_acc ≥ **76.0%** to declare a new champion. 75.3–75.9% = LR not the bottleneck either, and we should accept Run 8 as the production model and shift effort to **adding training data** (the only Tier-3 lever still untested).
+- **Decision after Run 12**:
+  - If ≥76%: ship Run 12 as champion, archive Run 11/10/9 retrospectives.
+  - If <76%: declare 75.3% the dataset ceiling, freeze Run 8 as production, and pivot to data collection or to deployment/evaluation work (Tier 4).
 
 ---
 
@@ -301,8 +337,9 @@ Eval metrics were not logged during training (context type filter mismatch — e
 | 8   | 2001  | 1.658* | **75.3%** | **85.7%**    | **92.8%** | **69.6%**  | **best all metrics** — timing context in decoder |
 | 9   | 1400† | 2.501* | 74.95%    | 85.5%        | 92.8%     | 69.6%      | rhythm_weight=8 underperformed Run 8; interrupted at step 1470 |
 | 10  | 2001  | 1.697* | 74.53%    | 85.4%        | 92.8%     | 69.2%      | dropout+smoothing both → 0.1; over-regularized, −0.77pp vs Run 8 |
+| 11  | 2001  | 1.673* | 75.12% (peak 75.17% @ 1800) | 85.84% | 92.81% | 69.63% | r=128, α=256; tied Run 8 within noise (−0.18pp), capacity not the bottleneck |
 
-\* Runs 5–6, Run 9, and Run 10 loss not directly comparable to earlier runs due to `rhythm_weight` / `label_smoothing` differences.
+\* Runs 5–6, Run 9, Run 10, and Run 11 loss not directly comparable to earlier runs due to `rhythm_weight` / `label_smoothing` differences.
 † Run 9 last eval step before machine interrupt — not a final-step result.
 
 ### Key Takeaways
@@ -320,12 +357,13 @@ Eval metrics were not logged during training (context type filter mismatch — e
 8. **Run 8 broke the timing plateau.** With the decoder now receiving the BPM beat grid as input context (via the post-Run 7 fix), exact timing accuracy jumped from 64.6% → **75.3%** (+10.7pp) without any other config changes vs Run 6. Fuzzy timing, other_acc, and column_acc also reached new bests. This confirms the plateau was caused by the decoder lacking explicit beat-grid information, not by data or capacity limits.
 9. **Run 9 ruled out higher `rhythm_weight`.** Bumping `rhythm_weight` from 5.0 → 8.0 on top of Run 8's config produced 74.95% timing_acc at step 1400 — 0.35pp *below* Run 8, with eval saturating while train loss kept falling. The Run 8 → Run 9 delta isolates the effect: loss re-weighting pushes the model to fit train harder, not to generalize.
 10. **Run 10 ruled out more regularization.** Doubling both `label_smoothing` (0.05 → 0.1) and `lora_dropout` (0.05 → 0.1) on top of Run 8's config produced 74.53% final — 0.77pp *below* Run 8. The train/test gap *did* tighten (3.1× vs Run 9's 5.3×), so the regularization was mechanically effective but traded away peak accuracy. Combined with Run 9, this brackets the answer: Run 8's `rhythm_weight=5`, `label_smoothing=0.05`, `lora_dropout=0.05` already sit at a near-optimal trade-off for this dataset. Further loss-weighting / regularization tuning is exhausted — the remaining axes are **capacity** (LoRA rank) and **schedule** (resume with lower LR).
+11. **Run 11 ruled out more capacity.** Doubling LoRA rank (64 → 128) with α scaled in step (128 → 256, keeping α/r=2) on top of Run 8's regularization produced 75.12% final / 75.17% peak — **0.18pp below Run 8** (within noise; effectively a tie). Train/test gap stayed clean at 3.7× — no overfitting from the extra params, just no extra signal from them either. Doubling trainable params from 26M → 52M for a tied result is a net loss. This now closes the third single-axis sweep against Run 8: **loss-weighting (Run 9), regularization (Run 10), and capacity (Run 11) all failed to beat 75.3%.** The plateau is most likely a **data ceiling** at 602 train samples, not a hyperparameter problem. Remaining cheap test: **schedule** — resume Run 8 with low LR (Run 12). After that, the realistic levers are data collection or accepting 75.3% and shipping.
 
 ---
 
 ## Next Steps: Improvement Suggestions
 
-Run 8 broke the timing plateau: exact timing accuracy reached **75.3%** (up from 64.6%), and the gap to fuzzy_timing_acc (85.7%) narrowed to ~10pp (from 20pp). Runs 9 and 10 both tried to exceed this from different angles (more loss-weighting, more regularization) and both underperformed. **Run 8 remains the best model.** The remaining untested axis is LoRA capacity — Run 11 tests that hypothesis before falling back to resume-and-polish from Run 8's checkpoint.
+Run 8 broke the timing plateau at **75.3%**. Three single-axis sweeps from Run 8 (loss-weighting Run 9, regularization Run 10, capacity Run 11) all underperformed within ±0.8pp — the latter two within noise. **Run 8 remains the best model.** The only cheap experiment left is **schedule** (Run 12: resume Run 8 with low-LR cosine tail). If Run 12 also fails to cross 76%, the realistic conclusion is that we're at the data ceiling for 602 train samples, and effort should shift to data collection or to shipping Run 8.
 
 ### Tested and Confirmed
 
@@ -337,7 +375,7 @@ Run 8 broke the timing plateau: exact timing accuracy reached **75.3%** (up from
 
 | # | Change | Rationale | Run |
 |---|--------|-----------|-----|
-| 12 | `lora.r: 64 → 128`, `lora.lora_alpha: 128 → 256`; revert smoothing/dropout to Run 8 | After Run 9 (rhythm_weight) and Run 10 (regularization) both failed, capacity is the remaining untested axis. | Run 11 |
+| 13 | Resume Run 8 with `base_lr=5e-5`, ~500–1000 steps | After Runs 9/10/11 each varied one axis (loss / regularization / capacity) and all tied or lost vs Run 8, the only untested cheap lever is schedule. Tests whether Run 8 was LR-limited at the cosine tail. | Run 12 |
 
 ### Tested and Rejected
 
@@ -347,15 +385,16 @@ Run 8 broke the timing plateau: exact timing accuracy reached **75.3%** (up from
 | ~~3~~ | Lower LR (0.0001) + 4000 steps | No improvement over 0.0002 / 2000 steps | Run 7 |
 | ~~4+5~~ | `label_smoothing: 0.1` + `lora_dropout: 0.1` | -0.77pp final vs Run 8; tightened gap but traded peak accuracy | Run 10 |
 | ~~7~~ | `rhythm_weight: 5 → 8` | -0.35pp timing @ step 1400 vs Run 8; widens train/test gap without eval gain | Run 9 |
-| ~~11~~ | More training data (+47%) | +1.3pp column/other, 0pp timing — not data-limited | Run 6 |
+| ~~11~~ | More training data (+47%, 410 → 603 samples) | +1.3pp column/other, 0pp timing — *pre-Run-8 timing context*; revisit at scale | Run 6 |
+| ~~12~~ | `lora.r: 64 → 128`, `lora_alpha: 128 → 256` (keep α/r=2) | -0.18pp final / -0.13pp peak vs Run 8 — tied within noise; doubled trainable params (26M → 52M) for no gain | Run 11 |
 
-### Medium Impact (next run candidates after Run 11)
+### Medium Impact (next run candidates after Run 12)
 
 | # | Suggestion | Rationale | Config change |
 |---|-----------|-----------|---------------|
 | 6 | **Reduce effective batch size** | Run 6 used effective batch 64 (vs 128 in Run 5) and achieved comparable timing with better column/other acc. Halving again to 32 would double gradient updates per epoch. | `optim.batch_size=32, optim.grad_acc=32` |
-| 13 | **Resume Run 8 with lower LR for the tail** | If Run 11 also underperforms, resume from Run 8's `checkpoint-2000` for ~500 steps at `base_lr=5e-5` to refine the existing best instead of re-searching. | Resume from Run 8 `checkpoint-2000`, override `base_lr=5e-5` |
-| 14 | **Middle-ground regularization** | Run 10 proved 0.1/0.1 over-regularizes but tightened the gap. If Run 11's r=128 overfits, try `label_smoothing=0.075` + `lora_dropout=0.075` on top of r=128 — halfway between Run 8 and Run 10. | `label_smoothing: 0.075`, `lora_dropout: 0.075` |
+| 14 | **Add more training data** | Three single-axis hyperparameter sweeps all plateaued at ~75.3% with clean train/test gaps — strong signal we're at the data ceiling, not the model ceiling. Run 6's data bump (+47%) was pre-Run-8 (no timing context), so it didn't show timing gains; revisit at scale once timing context is active. | Collect/label more SnapBeat charts, retrain with Run 8 config |
+| 15 | **Middle-ground regularization at r=128** | Combines Run 11's capacity with measured regularization (between Run 8's 0.05/0.05 and Run 10's 0.1/0.1). Only "compound" config not yet tested. Lower priority since Run 11 didn't show overfitting that needed correcting. | `lora.r: 128`, `lora_alpha: 256`, `label_smoothing: 0.075`, `lora_dropout: 0.075` |
 
 ### Lower Impact / Experimental
 
@@ -364,3 +403,5 @@ Run 8 broke the timing plateau: exact timing accuracy reached **75.3%** (up from
 | 8 | **Reduce LoRA rank** | Less capacity = less overfitting risk. Rank 64 with 602 samples may still be overkill. | `lora.r: 32` (from 64) |
 | 9 | **Snapping augmentation** | Randomly perturb snapping values during training for robustness. | `snapping_random_prob: 0.1` |
 | 10 | **Multi-context training** | Train with both `[timing] → [map]` and `[none] → [map]` so the model learns both modes. | Add second entry to `context_types` and `context_weights` |
+| 16 | **Base LR sweep at Run 8 config** | We never varied `base_lr` at the Run 8 setup (always 2e-4). Try 1e-4 and 5e-5 fresh runs (not just resume). Lower priority than Run 12 which tests the same axis more cheaply. | `optim.base_lr: 0.0001` or `0.00005` |
+| 17 | **Target module sweep** | Currently `[q, k, v, out_proj, fc1, fc2]`. Try attention-only (drop fc1/fc2) or add `embed_tokens`. Cheap to test if Run 12 is uninformative. | `lora.target_modules: [...]` |
