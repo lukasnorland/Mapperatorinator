@@ -80,6 +80,19 @@ def main(args: TrainConfig):
         #     print(n, p.sum())
         model.print_trainable_parameters()
 
+        if args.lora_resume_path:
+            import os
+            from safetensors.torch import load_file
+            from peft.utils.save_and_load import set_peft_model_state_dict
+            adapter_state = load_file(os.path.join(args.lora_resume_path, "adapter_model.safetensors"))
+            load_result = set_peft_model_state_dict(model, adapter_state)
+            missing = getattr(load_result, "missing_keys", [])
+            unexpected = getattr(load_result, "unexpected_keys", [])
+            non_lora_missing = [k for k in missing if "lora_" in k]
+            assert not non_lora_missing, f"LoRA keys missing from adapter: {non_lora_missing[:5]}"
+            assert not unexpected, f"Unexpected adapter keys: {unexpected[:5]}"
+            print(f"Resumed LoRA adapter weights from {args.lora_resume_path}")
+
     optimizer = get_optimizer(model, args)
     scheduler = get_scheduler(optimizer, args, accelerator)
 

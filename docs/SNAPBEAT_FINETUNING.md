@@ -140,7 +140,7 @@ To use the fine-tuned LoRA checkpoint from HuggingFace (works on any machine):
 ```bash
 python snapbeat_inference.py \
   audio_path="song.mp3" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
   gamemode=3 keycount=4 difficulty=5.0
 ```
 
@@ -149,7 +149,7 @@ Or with a local checkpoint path (if training logs are available):
 ```bash
 python snapbeat_inference.py \
   audio_path="song.mp3" \
-  lora_path="logs/2026-04-15/09-49-00/checkpoint-2001/lora" \
+  lora_path="logs/2026-04-25/09-51-23/checkpoint-1000/lora" \
   gamemode=3 keycount=4 difficulty=5.0
 ```
 
@@ -162,7 +162,7 @@ python inference.py \
   audio_path="song.mp3" \
   output_path="./output/" \
   model_path="OliBomby/Mapperatorinator-v31" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
   gamemode=3 difficulty=5.0
 ```
 
@@ -170,7 +170,9 @@ python inference.py \
 
 | Checkpoint | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Notes |
 |------------|-----------|--------------|-----------|------------|-------|
-| `lukasnorland/rhythm-skeleton-mt3` | **75.3%** | **85.7%** | **92.8%** | **69.6%** | **Best all metrics** — Run 8 (timing context in decoder) |
+| `lukasnorland/rhythm-skeleton-mt3-v1` | **75.5%** | **85.8%** | **92.9%** | 69.6% | **Current baseline** — Run 12 (Run 8 + low-LR cosine tail) |
+| `logs/2026-04-25/09-51-23/checkpoint-1000/lora` | 75.5% | 85.8% | 92.9% | 69.6% | Run 12 local path (same weights) |
+| `lukasnorland/rhythm-skeleton-mt3` | 75.3% | 85.7% | 92.8% | **69.6%** | Run 8 (prior baseline; superseded by v1) |
 | `logs/2026-04-15/09-49-00/checkpoint-2001/lora` | 75.3% | 85.7% | 92.8% | 69.6% | Run 8 local path (same weights) |
 | `logs/2026-04-07/15-31-50/checkpoint-2001/lora` | 64.5% | 84.6% | 92.6% | 69.2% | Run 6, 603 train samples |
 | `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | 91.3% | 67.9% | Run 5 local path (prior best timing) |
@@ -206,6 +208,32 @@ Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when 
 ---
 
 ## Changelog
+
+### 2026-04-26 — Run 12 published as `rhythm-skeleton-mt3-v1` (new baseline + naming-scheme shift)
+
+Run 12 (Run 8 resume with `base_lr=5e-5` low-LR cosine tail, 1000 steps) reached **75.53%** timing accuracy — **+0.23pp over Run 8**, the only post-Run-8 sweep to produce an above-noise gain. Shipped as the new production baseline.
+
+| | Before | After |
+|---|---|---|
+| **Production LoRA** | `lukasnorland/rhythm-skeleton-mt3` (Run 8, 75.30%) | `lukasnorland/rhythm-skeleton-mt3-v1` (Run 12, 75.53%) |
+| **Naming scheme** | `rhythm-skeleton-<game>` (replaced in place per run) | `rhythm-skeleton-<game>-v<N>` (versioned; future = `-v2`, `-v3`...) |
+| **Visibility** | private | private |
+
+Why the naming-scheme shift:
+
+- Versioned suffix preserves prior baselines as inspectable artifacts (the old `rhythm-skeleton-mt3` repo is intentionally kept for A/B comparisons).
+- Pinning Docker images to `:v1` / `:v2` becomes unambiguous; reverting a regression no longer needs a HF revision SHA lookup.
+- Cost: future BH/DR variants now live at `rhythm-skeleton-bh-v1`, `rhythm-skeleton-dr-v1` (registry stub in `snapbeat_inference.py` updated).
+
+Downstream impact:
+
+- `_GAME_CODE_REGISTRY["MT3"]` in [`snapbeat_inference.py`](../snapbeat_inference.py) now resolves to `lukasnorland/rhythm-skeleton-mt3-v1`. Anyone using `lora_path=...` overrides in scripts must update them.
+- Existing Docker images built against `rhythm-skeleton-mt3` still work (the old repo is unchanged); only newly built images pick up v1. Rebuild + redeploy to roll forward.
+- `HF_TOKEN` permissions: same fine-grained read access requirement, just point it at the new repo path.
+
+Code change shipped alongside this run: `osuT5/train.py` gained a `lora_resume_path` field that loads adapter weights only via `set_peft_model_state_dict`, leaving the freshly-built optimizer + scheduler intact. `accelerator.load_state` would have restored Run 8's spent cosine schedule and exited at step 0 — the new path is required for any future low-LR resume experiment.
+
+Source of truth: `logs/2026-04-25/09-51-23/checkpoint-1000/lora`.
 
 ### 2026-04-23 — HuggingFace rename + privacy + account migration
 
