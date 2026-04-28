@@ -7,8 +7,8 @@ DOCKER_CTX="${DOCKER_CTX:-desktop-linux}"
 
 IMAGE_NAME="${IMAGE_NAME:-snapbeat-api:test}"
 CONTAINER_NAME="${CONTAINER_NAME:-snapbeat-api}"
-HOST_PORT="${HOST_PORT:-8080}"
-CONTAINER_PORT="${CONTAINER_PORT:-8080}"
+HOST_PORT="${HOST_PORT:-5050}"
+CONTAINER_PORT="${CONTAINER_PORT:-5050}"
 ENV_FILE="${ENV_FILE:-.env}"
 
 cd "$(dirname "$0")"
@@ -31,6 +31,12 @@ echo "Building image: ${IMAGE_NAME}"
 DOCKER_BUILDKIT=1 docker --context "$DOCKER_CTX" build -f Dockerfile.deploy \
   --secret id=hf_token,env=HF_TOKEN \
   -t "${IMAGE_NAME}" .
+
+if lsof -nP -iTCP:"${HOST_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "ERROR: host port ${HOST_PORT} is already in use."
+  echo "Stop the process using it (example): lsof -nP -iTCP:${HOST_PORT} -sTCP:LISTEN"
+  exit 1
+fi
 
 echo "Running container: ${CONTAINER_NAME} on http://127.0.0.1:${HOST_PORT}"
 docker --context "$DOCKER_CTX" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true

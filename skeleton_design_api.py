@@ -122,12 +122,24 @@ def _sse(event: str, data_obj) -> str:
 
 def _download_audio(audio_url: str, dst_path: Path) -> None:
     dst_path.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(audio_url, stream=True, timeout=(10, 300)) as r:
-        r.raise_for_status()
+    def _stream_to_file(resp: requests.Response) -> None:
+        resp.raise_for_status()
         with open(dst_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if chunk:
                     f.write(chunk)
+
+    try:
+        with requests.get(audio_url, stream=True, timeout=(10, 300)) as r:
+            _stream_to_file(r)
+    except requests.exceptions.ProxyError:
+        # Some environments (notably Docker Desktop + corporate networking) can end up with
+        # proxy settings applied implicitly. Retry once with trust_env disabled to force
+        # a direct connection.
+        with requests.Session() as s:
+            s.trust_env = False
+            with s.get(audio_url, stream=True, timeout=(10, 300)) as r:
+                _stream_to_file(r)
 
 
 def _run_snapbeat_inference(audio_path: Path, output_path: Path) -> tuple[int, Iterator[str]]:
