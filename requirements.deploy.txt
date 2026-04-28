@@ -1,0 +1,31 @@
+# Runtime-only dependencies for the Dockerized SnapBeat inference image
+# (Option A — see .cursor/plans/dockerized_snapbeat_deploy_option_a_*.plan.md).
+#
+# KEEP THIS FILE IN SYNC with requirements.txt version pins. This is a
+# filtered subset that excludes:
+#   - GUI deps (pywebview, pyqtwebengine, flask) — only mai_mod_ui.py / web-ui.py
+#   - Training-only deps (lightning, tensorboard, torch_tb_profiler, matplotlib)
+#   - Python 3.13 shim (audioop-lts) — base image uses Python 3.11
+#
+# wandb is kept because osuT5/osuT5/utils/__init__.py does `from .train_utils
+# import *`, and train_utils.py has `import wandb` at module scope. Removing
+# wandb would break `import osuT5.osuT5.utils` in inference.py.
+
+accelerate==1.12.0
+pydub==0.25.1
+nnAudio==0.3.4
+torchaudio
+PyYAML==6.0.3
+transformers==4.57.3
+hydra-core==1.3.2
+slider @ git+https://github.com/OliBomby/slider.git@gedagedigedagedaoh
+pandas==2.3.3
+pyarrow==22.0.0
+einops==0.8.1
+rich==14.2.0
+peft==0.18.1
+rosu-pp-py==3.1.0
+wandb==0.24.2
+redis==6.4.0
+flask==3.1.2
+requests==2.33.1

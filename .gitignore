@@ -1,0 +1,36 @@
+# Python bytecode / caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.envrc
+
+# Local env files / secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
+
+# Common ML artifacts
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+
+# Local scratch / API job artifacts
+tmp/
+

@@ -1,0 +1,422 @@
+import multiprocessing
+import time
+from multiprocessing.managers import Namespace
+from pathlib import Path
+
+import torch
+import numpy as np
+from torch.optim import Optimizer
+from torch.utils.data import DataLoader, Dataset
+from torch.optim.lr_scheduler import (
+    LRScheduler,
+    SequentialLR,
+    LinearLR,
+    CosineAnnealingLR, ConstantLR,
+)
+
+from ..dataset.ors_dataset import OrsDataset
+from ..dataset.osu_parser import OsuParser
+from ..dataset.mmrs_dataset import MmrsDataset
+from ..dataset.snapbeat_dataset import SnapBeatDataset
+from ..dataset.snapbeat_parser import SnapBeatParser
+from ..event import EventType
+from ..model.configuration_mapperatorinator import MapperatorinatorConfig
+from ..model.modeling_mapperatorinator import Mapperatorinator
+from ..tokenizer import Tokenizer
+from ..config import TrainConfig
+
+
+def get_shared_training_state() -> Namespace:
+    mgr = multiprocessing.Manager()
+    shared = mgr.Namespace()
+    shared.current_train_step = 1
+    shared.current_epoch = 1
+    shared.last_log = time.time()
+    shared.current_loss = np.inf
+    shared.best_loss = np.inf
+    return shared
+
+
+def _get_model_config(
+        args: TrainConfig,
+        tokenizer: Tokenizer,
+        dtype: torch.dtype,
+        attn_implementation: str,
+) -> MapperatorinatorConfig:
+    return MapperatorinatorConfig(
+        backbone_model_name=args.model.name,
+        backbone_overwrite=args.model.overwrite,
+        backbone_add_config=args.model.add_config,
+        vocab_size_in=tokenizer.vocab_size_in,
+        vocab_size_out=tokenizer.vocab_size_out,
+        num_classes=tokenizer.num_classes,
+        num_mappers=tokenizer.num_mapper_classes,
+        input_features=args.model.input_features,
+        input_raw_wave=args.model.input_raw_wave,
+        project_encoder_input=args.model.project_encoder_input,
+        embed_decoder_input=args.model.embed_decoder_input,
+        do_style_embed=args.model.do_style_embed,
+        do_difficulty_embed=args.model.do_difficulty_embed,
+        do_mapper_embed=args.model.do_mapper_embed,
+        do_song_position_embed=args.model.do_song_position_embed,
+        cond_dim=args.model.cond_dim,
+        cond_size=args.model.cond_size,
+        spectrogram_implementation=args.model.spectrogram.implementation,
+        spectrogram_log_scale=args.model.spectrogram.log_scale,
+        sample_rate=args.model.spectrogram.sample_rate,
+        n_fft=args.model.spectrogram.n_fft,
+        n_mels=args.model.spectrogram.n_mels,
+        hop_length=args.model.spectrogram.hop_length,
+        f_min=args.model.spectrogram.f_min,
+        f_max=args.model.spectrogram.f_max,
+        pad_mode=args.model.spectrogram.pad_mode,
+        rhythm_weight=args.data.rhythm_weight,
+        rhythm_token_start=tokenizer.event_start[EventType.TIME_SHIFT],
+        rhythm_token_end=tokenizer.event_end[EventType.TIME_SHIFT],
+        label_smoothing=args.data.label_smoothing,
+        src_seq_len=args.data.src_seq_len,
+        tgt_seq_len=args.data.tgt_seq_len,
+        rope_type=args.model.rope_type,
+        rope_encoder_scaling_factor=args.model.rope_encoder_scaling_factor,
+        rope_decoder_scaling_factor=args.model.rope_decoder_scaling_factor,
+        rope_scaling=args.model.rope_scaling,
+        deterministic_flash_attn=args.model.deterministic_flash_attn,
+        attention_bias=args.model.attention_bias,
+        global_attn_every_n_layers=args.model.global_attn_every_n_layers,
+        local_attention=args.model.local_attention,
+        local_rope_theta=args.model.local_rope_theta,
+        global_rope_theta=args.model.global_rope_theta,
+        pad_token_id=tokenizer.pad_id,
+        bos_token_id=tokenizer.sos_id,
+        eos_token_id=tokenizer.eos_id,
+        decoder_start_token_id=tokenizer.sos_id,
+        max_length=args.data.tgt_seq_len,
+        dtype=dtype,
+        attn_implementation=attn_implementation,
+    )
+
+
+def _get_model(
+        args: TrainConfig,
+        tokenizer: Tokenizer,
+        dtype: torch.dtype,
+        attn_implementation: str,
+) -> Mapperatorinator:
+    model = Mapperatorinator(_get_model_config(
+        args,
+        tokenizer,
+        dtype,
+        attn_implementation,
+    ))
+    return model
+
+
+def _precision_to_dtype(precision: str) -> torch.dtype:
+    if precision == "fp32":
+        return torch.float32
+    elif precision == "fp16":
+        return torch.float16
+    elif precision == "bf16":
+        return torch.bfloat16
+    elif precision == "amp":
+        return torch.float32  # Handled separately with autocast
+    else:
+        raise ValueError(f"Unsupported precision: {precision}")
+
+
+def load_model(
+        ckpt_path_str: str,
+        t5_args: TrainConfig,
+        device,
+        precision: str = "fp32",
+        attn_implementation: str = "sdpa",
+        eval_mode: bool = True,
+        pickle_module=None,
+        lora_path=None,
+):
+    model_loader, tokenizer_loader = load_model_loaders(
+        ckpt_path_str,
+        t5_args,
+        device,
+        precision,
+        attn_implementation,
+        eval_mode,
+        pickle_module,
+        lora_path=lora_path,
+    )
+    return model_loader(), tokenizer_loader()
+
+
+def load_model_loaders(
+        ckpt_path_str: str,
+        t5_args: TrainConfig,
+        device,
+        precision: str = "fp32",
+        attn_implementation: str = "sdpa",
+        eval_mode: bool = True,
+        pickle_module=None,
+        lora_path=None,
+):
+    if ckpt_path_str == "":
+        if eval_mode:
+            raise ValueError("Model path is empty.")
+        else:
+            print("No pretrained model path provided, training from scratch.")
+
+    ckpt_path = Path(ckpt_path_str)
+
+    def tokenizer_loader():
+        if ckpt_path_str == "":
+            tokenizer = get_tokenizer(t5_args)
+        elif not (ckpt_path / "pytorch_model.bin").exists() or not (ckpt_path / "custom_checkpoint_0.pkl").exists():
+            tokenizer = Tokenizer.from_pretrained(ckpt_path_str)
+        else:
+            tokenizer_state = torch.load(ckpt_path / "custom_checkpoint_0.pkl", pickle_module=pickle_module, weights_only=False)
+            tokenizer = Tokenizer()
+            tokenizer.load_state_dict(tokenizer_state)
+        return tokenizer
+
+    tokenizer = tokenizer_loader()
+
+    def model_loader():
+        dtype = _precision_to_dtype(precision)
+        if ckpt_path_str == "":
+            model = _get_model(t5_args, tokenizer, dtype=dtype, attn_implementation=attn_implementation)
+            model.to(device=device, dtype=dtype)
+        elif not (ckpt_path / "pytorch_model.bin").exists() or not (ckpt_path / "custom_checkpoint_0.pkl").exists():
+            model = Mapperatorinator.from_pretrained(
+                ckpt_path_str,
+                dtype=dtype,
+                attn_implementation=attn_implementation,
+                device_map=device
+            )
+            model.generation_config.disable_compile = True
+        else:
+            model_state = torch.load(ckpt_path / "pytorch_model.bin", weights_only=True)
+            model = _get_model(t5_args, tokenizer, dtype=dtype, attn_implementation=attn_implementation)
+            if t5_args.pretrained_t5_compat:
+                del model_state["shared.weight"]
+                del model_state["encoder.embed_tokens.weight"]
+                del model_state["decoder.embed_tokens.weight"]
+                del model_state["lm_head.weight"]
+                model.transformer.load_state_dict(model_state, strict=False)
+            else:
+                model.load_state_dict(model_state)
+            model.to(device=device, dtype=dtype)
+
+        if lora_path is not None:
+            try:
+                from peft import PeftModel
+            except ImportError:
+                raise ImportError("Please install the 'peft' library to use LoRA fine-tuning.")
+            model = PeftModel.from_pretrained(model, lora_path)
+            model = model.merge_and_unload()
+            print(f"Loaded LoRA weights from {lora_path}")
+
+        if eval_mode:
+            model.eval()
+
+        print(f"Model loaded: {ckpt_path_str} on device {device}")
+        return model
+
+    return model_loader, tokenizer_loader
+
+
+def get_tokenizer(args: TrainConfig) -> Tokenizer:
+    return Tokenizer(args)
+
+
+def get_optimizer(model: Mapperatorinator, args: TrainConfig) -> Optimizer:
+    no_decay = ["bias", "LayerNorm", "layernorm", "layer_norm", "ln"]
+
+    optimizer_grouped_parameters = [
+        {
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if not any(nd in n for nd in no_decay)
+            ],
+            "weight_decay": args.optim.weight_decay,
+        },
+        {
+            "params": [
+                p
+                for n, p in model.named_parameters()
+                if any(nd in n for nd in no_decay)
+            ],
+            "weight_decay": 0.0,
+        },
+    ]
+
+    if args.optim.name == 'adamw':
+        from torch.optim import AdamW
+        optimizer = AdamW(
+            optimizer_grouped_parameters,
+            lr=args.optim.base_lr,
+        )
+    elif args.optim.name == 'adamwscale':
+        from .copied_utils import AdamWScale
+        optimizer = AdamWScale(
+            optimizer_grouped_parameters,
+            lr=args.optim.base_lr,
+        )
+    elif args.optim.name == 'adafactor':
+        from torch.optim import Adafactor
+        optimizer = Adafactor(
+            optimizer_grouped_parameters,
+            lr=args.optim.base_lr,
+        )
+    elif args.optim.name == 'muon':
+        from .muon_utils import Muon
+        """
+        Muon is intended to optimize only the internal ≥2D parameters of a network. 
+        Embeddings, classifier heads, and scalar or vector parameters should be optimized using AdamW.
+        """
+        adamw_params = [
+            param for name, param in model.named_parameters()
+            if (any(kw in name.lower() for kw in {'embed', 'proj_out'}) or param.ndim <= 1)
+        ]
+        
+        adamw_param_set = set(adamw_params)
+        muon_params = [
+            param for _, param in model.named_parameters()
+            if param not in adamw_param_set
+        ]
+        print(f"Number of parameters for Muon: {len(muon_params)}")
+        print(f"Number of parameters for AdamW: {len(adamw_params)}")
+
+        optimizer = Muon(
+            muon_params=muon_params,
+            lr=args.optim.base_lr,
+            adamw_lr=args.optim.base_lr_2,
+            adamw_params=adamw_params,
+            adamw_betas=(0.90, 0.95),
+            adamw_wd=args.optim.weight_decay,
+        )
+    else:
+        raise NotImplementedError
+
+    return optimizer
+
+
+def get_scheduler(optimizer: Optimizer, args: TrainConfig, accelerator) -> LRScheduler:
+    step = 0
+    schedulers = []
+    milestones = []
+
+    if args.optim.warmup_steps > 0:
+        schedulers.append(LinearLR(
+            optimizer,
+            start_factor=0.5,
+            end_factor=1,
+            total_iters=args.optim.warmup_steps * accelerator.num_processes,
+        ))
+        step += args.optim.warmup_steps * accelerator.num_processes
+        milestones.append(step)
+
+    if args.optim.sustain_steps > 0:
+        schedulers.append(ConstantLR(
+            optimizer,
+            factor=1.0,
+            total_iters=args.optim.sustain_steps * accelerator.num_processes,
+        ))
+        step += args.optim.sustain_steps * accelerator.num_processes
+        milestones.append(step)
+
+    if args.optim.lr_scheduler == "cosine":
+        schedulers.append(CosineAnnealingLR(
+            optimizer,
+            T_max=args.optim.total_steps * accelerator.num_processes - step,
+            eta_min=args.optim.final_cosine,
+        ))
+    elif args.optim.lr_scheduler == "linear":
+        schedulers.append(LinearLR(
+            optimizer,
+            start_factor=1.0,
+            end_factor=args.optim.final_cosine / args.optim.base_lr,
+            total_iters=args.optim.total_steps * accelerator.num_processes - step,
+        ))
+
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=schedulers,
+        milestones=milestones,
+    )
+
+    return scheduler
+
+
+def get_dataset(args: TrainConfig, test: bool, **kwargs) -> Dataset:
+    if args.data.dataset_type == "ors":
+        return OrsDataset(args=args.data, test=test, **kwargs)
+    elif args.data.dataset_type == "mmrs":
+        return MmrsDataset(args=args.data, **kwargs)
+    elif args.data.dataset_type == "snapbeat":
+        return SnapBeatDataset(args=args.data, test=test, **kwargs)
+    else:
+        raise NotImplementedError
+
+
+def get_dataloaders(tokenizer: Tokenizer, args: TrainConfig, shared: Namespace) -> tuple[DataLoader, DataLoader]:
+    if args.data.dataset_type == "snapbeat":
+        parser = SnapBeatParser(
+            types_first=args.data.types_first,
+            add_snapping=args.data.add_snapping,
+            add_timing_points=args.data.add_timing_points,
+            sustain_interval=args.data.sustain_interval,
+        )
+    else:
+        parser = OsuParser(args, tokenizer)
+    dataset = {
+        "train": get_dataset(
+            args=args,
+            test=False,
+            parser=parser,
+            tokenizer=tokenizer,
+            shared=shared,
+        ),
+        "test": get_dataset(
+            args=args,
+            test=True,
+            parser=parser,
+            tokenizer=tokenizer,
+            shared=shared,
+        ),
+    }
+
+    dataloaders = {}
+    for split in ["train", "test"]:
+        batch_size = args.optim.batch_size // args.optim.grad_acc
+
+        # SnapBeat uses IterableDataset; persistent workers often stall or hang when the
+        # iterator restarts at epoch 2+ (especially on Windows with spawn).
+        nw = args.dataloader.num_workers
+        persist = nw > 0 and args.data.dataset_type != "snapbeat"
+
+        dataloaders[split] = DataLoader(
+            dataset[split],
+            batch_size=batch_size,
+            num_workers=nw,
+            pin_memory=args.dataloader.pin_memory,
+            drop_last=args.dataloader.drop_last,
+            persistent_workers=persist,
+            worker_init_fn=worker_init_fn,
+        )
+
+    return dataloaders["train"], dataloaders["test"]
+
+
+def worker_init_fn(worker_id: int) -> None:
+    """
+    Give each dataloader a unique slice of the full dataset.
+    """
+    worker_info = torch.utils.data.get_worker_info()
+    dataset = worker_info.dataset  # the dataset copy in this worker process
+    overall_start = dataset.start
+    overall_end = dataset.end
+    # configure the dataset to only process the split workload
+    per_worker = int(
+        np.ceil((overall_end - overall_start) / float(worker_info.num_workers)),
+    )
+    dataset.start = overall_start + worker_id * per_worker
+    dataset.end = min(dataset.start + per_worker, overall_end)

@@ -1,0 +1,93 @@
+defaults:
+  - lora
+  - _self_
+
+pretrained_path: "OliBomby/Mapperatorinator-v31"
+# Run 12: resume Run 8's adapter weights only (fresh optimizer/scheduler with low LR).
+# Loaded by osuT5/train.py via set_peft_model_state_dict; uses adapter_model.safetensors only.
+lora_resume_path: "/home/norland/dev/Mapperatorinator/logs/2026-04-15/09-49-00/checkpoint-2000/lora"
+
+# Avoid W&B unless configured; use tensorboard (see docs/SNAPBEAT_FINETUNING.md).
+logging:
+  log_with: tensorboard
+
+data:
+  dataset_type: "snapbeat"
+  # JSON: ./datasets/dataset/json. Audio: ./datasets/dataset/audio (same UUID stems). Override with data.snapbeat_audio_path if audio lives elsewhere (e.g. ./dataset/audio).
+  train_dataset_path: "./datasets/dataset"
+  test_dataset_path: "./datasets/dataset"
+  snapbeat_audio_path: ""
+  train_dataset_start: 0
+  train_dataset_end: 602
+  test_dataset_start: 602
+  test_dataset_end: 669
+  gamemodes: [3]
+  per_track: true
+  # Disable osu!-specific features not relevant to SnapBeat
+  add_gamemode_token: true
+  add_style_token: false
+  add_diff_token: false
+  add_mapper_token: false
+  add_year_token: false
+  add_hitsounded_token: false
+  add_song_length_token: false
+  add_global_sv_token: false
+  add_cs_token: false
+  add_keycount_token: true
+  add_hold_note_ratio_token: true
+  add_scroll_speed_ratio_token: false
+  add_descriptors: false
+  add_sv_special_token: false
+  add_kiai_special_token: false
+  add_song_position_token: false
+  add_timing: true
+  add_snapping: true
+  add_timing_points: true
+  add_hitsounds: false
+  add_distances: false
+  add_positions: false
+  add_sv: false
+  add_mania_sv: false
+  add_kiai: false
+  add_gd_context: false
+  add_pre_tokens: false
+  add_empty_sequences: true
+  types_first: true
+  rhythm_weight: 5.0            # Run 11: keep at 5.0 (Runs 9/10 showed near-optimal)
+  label_smoothing: 0.05         # Run 11: revert 0.1 → 0.05 — Run 10 (0.1/0.1) under-performed Run 8 (0.05/0.05) by 0.77pp
+  dt_augment_prob: 0.0          # disable DT augment — SnapBeat has fixed BPM, this just adds noise
+  dt_augment_range: [1.1, 1.4]
+  timing_random_offset: 0              # jitter hurts exact timing (Run 7: -9pp) — keep off
+  context_types:
+    - "in": ['${context_type:timing}']
+      "out": ['${context_type:map}']
+  context_weights: [1]
+
+optim:
+  name: muon
+  base_lr: 0.00005             # Run 12: 1/4 of Run 8's 2e-4 — low-LR polish on top of Run 8 weights
+  base_lr_2: 0.000025          # Run 12: 1/4 of Run 8's 1e-4
+  batch_size: 64
+  grad_acc: 64
+  total_steps: 1000            # Run 12: 1000 steps for low-LR tail (Run 8 was 2000)
+  warmup_steps: 50             # Run 12: short warmup — model already converged
+  lr_scheduler: cosine
+  final_cosine: 0
+
+dataloader:
+  num_workers: 4
+
+eval:
+  every_steps: 200
+  steps: 50
+
+checkpoint:
+  every_steps: 500
+
+lora:
+  r: 64                         # Run 12: revert to Run 8's r=64 (Run 11 r=128 tied within noise; resume requires matching shape)
+  lora_alpha: 128               # Run 12: revert to Run 8's alpha=128 (alpha/r=2 unchanged)
+  target_modules: ['k_proj', 'v_proj', 'q_proj', 'out_proj', 'fc1', 'fc2']
+  lora_dropout: 0.05            # Run 8 value
+  bias: "none"
+  init_lora_weights: "pissa"    # init is overwritten by resumed adapter weights — kept for shape/config consistency
