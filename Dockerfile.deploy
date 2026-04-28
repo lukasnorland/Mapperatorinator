@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Production Dockerfile for SnapBeat inference (Option A — Dockerized CLI).
+# Production Dockerfile for SnapBeat inference (API — Skeleton Design SSE).
 # Builds a self-contained image with Mapperatorinator v31 base + the fine-tuned
 # rhythm-skeleton-mt3-v1 LoRA baked in, so the backend server does not need
 # network access to HuggingFace at runtime.
@@ -12,10 +12,9 @@
 #     -t snapbeat-lora:mt3-v1 .
 #
 # Run:
-#   docker run --rm --gpus all \
-#     -v "$PWD/in:/in:ro" -v "$PWD/out:/out" \
-#     snapbeat-lora:dev \
-#     audio_path=/in/song.mp3 output_path=/out
+#   docker run --rm --gpus all --network host \
+#     -e REDIS_HOST=127.0.0.1 -e REDIS_PORT=6379 -e REDIS_DB=0 -e REDIS_TTL_SECONDS=86400 \
+#     snapbeat-api:dev
 
 FROM pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel
 
@@ -43,6 +42,10 @@ RUN MAX_JOBS=4 pip install --no-build-isolation flash-attn==2.7.4.post1
 
 COPY . .
 
+# Ensure the runtime user can write API temp files.
+# (skeleton_design_api.py writes under /app/tmp by default.)
+RUN mkdir -p /app/tmp /app/logs
+
 # Bake the base model + LoRA into the image. HF_TOKEN is mounted via BuildKit
 # secret (tmpfs); it never appears in a layer or `docker history`. required=false
 # lets this Dockerfile still build against public repos without a token.
@@ -59,8 +62,10 @@ snapshot_download('${LORA_REPO}', token=tok)"
 # owned by root on the host. /data is the conventional mount point.
 RUN useradd -m -u 10001 runner \
     && mkdir -p /data /in /out \
-    && chown -R runner:runner /data /in /out /opt/hf
+    && chown -R runner:runner /data /in /out /opt/hf /app/tmp /app/logs
 USER runner
 
-ENTRYPOINT ["python", "snapbeat_inference.py"]
-CMD ["--help"]
+EXPOSE 8080
+
+# SSE API server (Flask).
+ENTRYPOINT ["python", "skeleton_design_api.py"]

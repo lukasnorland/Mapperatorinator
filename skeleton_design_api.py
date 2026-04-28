@@ -29,11 +29,41 @@ REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1").strip() or "127.0.0.1"
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
 REDIS_TTL_SECONDS = int(os.environ.get("REDIS_TTL_SECONDS", "86400"))
+REDIS_PASSWORD = (os.environ.get("REDIS_PASSWORD") or "").strip() or None
+REDIS_CLUSTER_MODE = (os.environ.get("REDIS_CLUSTER_MODE") or "").strip().lower() in {"1", "true", "yes", "y"}
+REDIS_TLS = (os.environ.get("REDIS_TLS") or "").strip().lower() in {"1", "true", "yes", "y"}
 
 
 def _redis_client() -> redis.Redis | None:
     try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True)
+        # Fail fast if Redis is misconfigured/unreachable. This API should still work
+        # (just without caching) when Redis isn't available.
+        if REDIS_CLUSTER_MODE:
+            from redis.cluster import RedisCluster
+
+            r = RedisCluster(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                password=REDIS_PASSWORD,
+                decode_responses=True,
+                socket_connect_timeout=0.3,
+                socket_timeout=0.3,
+                ssl=REDIS_TLS,
+                require_full_coverage=False,
+            )
+            r.ping()
+            return r  # type: ignore[return-value]
+
+        r = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            db=REDIS_DB,
+            password=REDIS_PASSWORD,
+            decode_responses=True,
+            socket_connect_timeout=0.3,
+            socket_timeout=0.3,
+            ssl=REDIS_TLS,
+        )
         r.ping()
         return r
     except Exception:
@@ -139,10 +169,11 @@ def snapbeat_sse() -> Response:
     filename = _filename_from_audio_url(audio_url)
 
     def generate() -> Iterator[str]:
-        r = _redis_client()
+        r: redis.Redis | None = None
         hashcode: str | None = None
         try:
             yield _sse("status", {"stage": "init", "job_id": job_id, "song_name": song_name})
+            r = _redis_client()
             yield _sse("status", {"stage": "download", "audio_url": audio_url})
 
             # Download into a per-job folder first so we can hash the bytes.
@@ -157,17 +188,35 @@ def snapbeat_sse() -> Response:
             hashcode = hashcode_full[:16]
             yield _sse("status", {"stage": "hash_computed", "hashcode": hashcode})
 
-            redis_base_key = f"skeleton_data:{song_name}_{hashcode}"
-            redis_results_key = f"{redis_base_key}:results"
-            redis_status_key = f"{redis_base_key}:status"
+            # Content-addressed keys (same bytes → same hash): reuse across jobs without duplicate storage.
+            redis_results_key = f"skeleton_data:{hashcode}:results"
+            redis_status_key = f"skeleton_data:{hashcode}:status"
             if r is not None:
                 cached = r.get(redis_results_key)
                 if cached:
                     try:
                         cached_obj = json.loads(cached)
+                        r.setex(
+                            redis_status_key,
+                            REDIS_TTL_SECONDS,
+                            json.dumps(
+                                {
+                                    "status": "success",
+                                    "stage": "cache_hit",
+                                    "job_id": job_id,
+                                    "song_name": song_name,
+                                    "hashcode": hashcode,
+                                }
+                            ),
+                        )
                         yield _sse(
                             "status",
-                            {"stage": "cache_hit", "hashcode": hashcode, "key": redis_results_key},
+                            {
+                                "stage": "cache_hit",
+                                "hashcode": hashcode,
+                                "results_key": redis_results_key,
+                                "status_key": redis_status_key,
+                            },
                         )
                         yield _sse("end", {"status": "success", "results": cached_obj})
                         return
@@ -305,7 +354,8 @@ def snapbeat_sse() -> Response:
                 snapbeat_obj = json.load(f)
 
             if r is not None:
-                r.setex(redis_results_key, REDIS_TTL_SECONDS, json.dumps(snapbeat_obj, ensure_ascii=False))
+                payload = json.dumps(snapbeat_obj, ensure_ascii=False)
+                r.setex(redis_results_key, REDIS_TTL_SECONDS, payload)
                 r.setex(
                     redis_status_key,
                     REDIS_TTL_SECONDS,
@@ -314,12 +364,6 @@ def snapbeat_sse() -> Response:
 
             yield _sse("end", {"status": "success", "results": snapbeat_obj})
         except requests.RequestException as e:
-            if r is not None:
-                r.setex(
-                    f"{song_name}__{job_id}:status",
-                    REDIS_TTL_SECONDS,
-                    json.dumps({"status": "error", "message": "Download failed", "detail": str(e), "job_id": job_id}),
-                )
             yield _sse("end", {"status": "error", "message": "Download failed", "detail": str(e)})
         except Exception as e:
             yield _sse("end", {"status": "error", "message": "Unhandled error", "detail": str(e)})
@@ -340,5 +384,7 @@ def snapbeat_sse() -> Response:
 
 if __name__ == "__main__":
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    app.run(host="127.0.0.1", port=5050, threaded=True, debug=False)
+    # Bind to all interfaces for containerized deployment.
+    port = int(os.environ.get("PORT", "8080"))
+    app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
 
