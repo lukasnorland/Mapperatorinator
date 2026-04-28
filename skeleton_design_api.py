@@ -172,7 +172,7 @@ def snapbeat_sse() -> Response:
         r: redis.Redis | None = None
         hashcode: str | None = None
         try:
-            yield _sse("status", {"stage": "init", "job_id": job_id, "song_name": song_name})
+            yield _sse("status", {"stage": "init", "job_id": job_id, "song_name": song_name, "audio_url": audio_url})
             r = _redis_client()
             yield _sse("status", {"stage": "download", "audio_url": audio_url})
 
@@ -186,7 +186,7 @@ def snapbeat_sse() -> Response:
 
             hashcode_full = _file_sha256(audio_path)
             hashcode = hashcode_full[:16]
-            yield _sse("status", {"stage": "hash_computed", "hashcode": hashcode})
+            yield _sse("status", {"stage": "hash_computed", "hashcode": hashcode, "audio_url": audio_url})
 
             # Content-addressed keys (same bytes → same hash): reuse across jobs without duplicate storage.
             redis_results_key = f"skeleton_data:{hashcode}:results"
@@ -195,7 +195,7 @@ def snapbeat_sse() -> Response:
                 cached = r.get(redis_results_key)
                 if cached:
                     try:
-                        cached_obj = json.loads(cached)
+                        cached_parsed = json.loads(cached)
                         r.setex(
                             redis_status_key,
                             REDIS_TTL_SECONDS,
@@ -206,6 +206,7 @@ def snapbeat_sse() -> Response:
                                     "job_id": job_id,
                                     "song_name": song_name,
                                     "hashcode": hashcode,
+                                    "audio_url": audio_url,
                                 }
                             ),
                         )
@@ -216,9 +217,16 @@ def snapbeat_sse() -> Response:
                                 "hashcode": hashcode,
                                 "results_key": redis_results_key,
                                 "status_key": redis_status_key,
+                                "audio_url": audio_url,
                             },
                         )
-                        yield _sse("end", {"status": "success", "results": cached_obj})
+                        if isinstance(cached_parsed, dict) and "results" in cached_parsed:
+                            results_out = cached_parsed["results"]
+                            out_audio_url = cached_parsed.get("audio_url", audio_url)
+                        else:
+                            results_out = cached_parsed
+                            out_audio_url = audio_url
+                        yield _sse("end", {"status": "success", "results": results_out, "audio_url": out_audio_url})
                         return
                     except Exception:
                         # If cache is corrupted, ignore and recompute.
@@ -226,7 +234,15 @@ def snapbeat_sse() -> Response:
                 r.setex(
                     redis_status_key,
                     REDIS_TTL_SECONDS,
-                    json.dumps({"status": "running", "stage": "download_done", "job_id": job_id, "song_name": song_name}),
+                    json.dumps(
+                        {
+                            "status": "running",
+                            "stage": "download_done",
+                            "job_id": job_id,
+                            "song_name": song_name,
+                            "audio_url": audio_url,
+                        }
+                    ),
                 )
 
             yield _sse("status", {"stage": "inference_start"})
@@ -296,7 +312,13 @@ def snapbeat_sse() -> Response:
                             redis_status_key,
                             REDIS_TTL_SECONDS,
                             json.dumps(
-                                {"status": "running", "stage": "inference_running", "job_id": job_id, "song_name": song_name}
+                                {
+                                    "status": "running",
+                                    "stage": "inference_running",
+                                    "job_id": job_id,
+                                    "song_name": song_name,
+                                    "audio_url": audio_url,
+                                }
                             ),
                         )
                     last_ping = time.time()
@@ -316,10 +338,14 @@ def snapbeat_sse() -> Response:
                                 "exit_code": exit_code,
                                 "job_id": job_id,
                                 "song_name": song_name,
+                                "audio_url": audio_url,
                             }
                         ),
                     )
-                yield _sse("end", {"status": "error", "message": "Inference failed", "exit_code": exit_code})
+                yield _sse(
+                    "end",
+                    {"status": "error", "message": "Inference failed", "exit_code": exit_code, "audio_url": audio_url},
+                )
                 return
 
             # Default naming from snapbeat_inference.py:
@@ -337,6 +363,7 @@ def snapbeat_sse() -> Response:
                                 "path": str(snapbeat_json_path),
                                 "job_id": job_id,
                                 "song_name": song_name,
+                                "audio_url": audio_url,
                             }
                         ),
                     )
@@ -346,6 +373,7 @@ def snapbeat_sse() -> Response:
                         "status": "error",
                         "message": "Missing snapbeat json output",
                         "path": str(snapbeat_json_path),
+                        "audio_url": audio_url,
                     },
                 )
                 return
@@ -354,19 +382,26 @@ def snapbeat_sse() -> Response:
                 snapbeat_obj = json.load(f)
 
             if r is not None:
-                payload = json.dumps(snapbeat_obj, ensure_ascii=False)
+                envelope = {"audio_url": audio_url, "results": snapbeat_obj}
+                payload = json.dumps(envelope, ensure_ascii=False)
                 r.setex(redis_results_key, REDIS_TTL_SECONDS, payload)
                 r.setex(
                     redis_status_key,
                     REDIS_TTL_SECONDS,
-                    json.dumps({"status": "success", "job_id": job_id, "song_name": song_name}),
+                    json.dumps({"status": "success", "job_id": job_id, "song_name": song_name, "audio_url": audio_url}),
                 )
 
-            yield _sse("end", {"status": "success", "results": snapbeat_obj})
+            yield _sse("end", {"status": "success", "results": snapbeat_obj, "audio_url": audio_url})
         except requests.RequestException as e:
-            yield _sse("end", {"status": "error", "message": "Download failed", "detail": str(e)})
+            yield _sse(
+                "end",
+                {"status": "error", "message": "Download failed", "detail": str(e), "audio_url": audio_url},
+            )
         except Exception as e:
-            yield _sse("end", {"status": "error", "message": "Unhandled error", "detail": str(e)})
+            yield _sse(
+                "end",
+                {"status": "error", "message": "Unhandled error", "detail": str(e), "audio_url": audio_url},
+            )
         finally:
             # Always cleanup any disk artifacts for this audio.
             try:

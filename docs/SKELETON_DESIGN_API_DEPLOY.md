@@ -165,10 +165,17 @@ Keys:
 
 Poll using `hashcode` from SSE (`hash_computed` / `cache_hit`). Download failures occur before hash and are SSE-only (no Redis key).
 
+Payloads:
+
+- `:status` JSON includes `audio_url` (and `job_id`, `song_name`, etc.) on success and error paths after hash.
+- `:results` JSON is an envelope `{"audio_url": "<request url>", "results": <SnapBeat object>}`. Older cached keys may still hold a raw SnapBeat object without `audio_url`.
+
 Behavior:
 
 - If `:results` exists for that `hashcode`, the API returns immediately with `cache_hit` (still downloads to compute hash).
 - Otherwise it runs inference and writes `:results` + `:status`.
+
+SSE final `end` events include `audio_url` alongside `results` / error fields where applicable.
 
 ---
 
