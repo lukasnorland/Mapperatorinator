@@ -14,6 +14,8 @@ fi
 # shellcheck disable=SC1090
 source "$VENV_DIR/bin/activate"
 
+ORIGINAL_PORT="${PORT-}"
+
 if [[ -f ".env" ]]; then
   echo "[run_api] Loading .env into environment"
   set -a
@@ -24,7 +26,11 @@ if [[ -f ".env" ]]; then
 fi
 
 echo "[run_api] Starting Skeleton Design SSE API"
-export PORT="${PORT:-5050}"
+if [[ -n "${ORIGINAL_PORT}" ]]; then
+  export PORT="${ORIGINAL_PORT}"
+else
+  export PORT="${PORT:-8080}"
+fi
 echo "[run_api] POST http://127.0.0.1:${PORT}/api/skeleton-design"
 exec python skeleton_design_api.py
 

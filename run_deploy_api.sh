@@ -32,6 +32,12 @@ DOCKER_BUILDKIT=1 docker --context "$DOCKER_CTX" build -f Dockerfile.deploy \
   --secret id=hf_token,env=HF_TOKEN \
   -t "${IMAGE_NAME}" .
 
+if lsof -nP -iTCP:"${HOST_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "ERROR: host port ${HOST_PORT} is already in use."
+  echo "Stop the process using it (example): lsof -nP -iTCP:${HOST_PORT} -sTCP:LISTEN"
+  exit 1
+fi
+
 echo "Running container: ${CONTAINER_NAME} on http://127.0.0.1:${HOST_PORT}"
 docker --context "$DOCKER_CTX" rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
 docker --context "$DOCKER_CTX" run -d --name "$CONTAINER_NAME" \
