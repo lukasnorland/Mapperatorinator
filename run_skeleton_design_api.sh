@@ -29,7 +29,7 @@ echo "[run_api] Starting Skeleton Design SSE API"
 if [[ -n "${ORIGINAL_PORT}" ]]; then
   export PORT="${ORIGINAL_PORT}"
 else
-  export PORT="${PORT:-5050}"
+  export PORT="${PORT:-8080}"
 fi
 echo "[run_api] POST http://127.0.0.1:${PORT}/api/skeleton-design"
 exec python skeleton_design_api.py
