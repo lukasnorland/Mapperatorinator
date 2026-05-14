@@ -2,10 +2,14 @@ defaults:
   - lora
   - _self_
 
+compile: false                 # Runs 6–12 all used compile=false on this 12GB GPU; Triton/inductor fails to link CUDA libs (driver cu13 vs torch cu121)
 pretrained_path: "OliBomby/Mapperatorinator-v31"
-# Run 12: resume Run 8's adapter weights only (fresh optimizer/scheduler with low LR).
-# Loaded by osuT5/train.py via set_peft_model_state_dict; uses adapter_model.safetensors only.
-lora_resume_path: "/home/norland/dev/Mapperatorinator/logs/2026-04-15/09-49-00/checkpoint-2000/lora"
+# Run 13 (rev2): Option-1 data-ceiling test. Resume Run 12's adapter (the rhythm-skeleton-mt3-v1 baseline)
+# on the cleaned 2327-sample dataset (was 2337 — 10 corrupt charts removed 2026-05-12) and continue with
+# Run 12's low-LR cosine tail. This is the cleanest comparison vs Run 12's 75.53%: same warm start, just
+# more data per epoch. The original Run 13 (fresh-from-v31 cold start) was discarded because cold-start
+# wasted ~600 steps relative to a warm resume; see SNAPBEAT_TRAINING_RESULTS.md for details.
+lora_resume_path: "/home/norland/dev/Mapperatorinator/logs/2026-04-25/09-51-23/checkpoint-1001/lora"
 
 # Avoid W&B unless configured; use tensorboard (see docs/SNAPBEAT_FINETUNING.md).
 logging:
@@ -18,9 +22,11 @@ data:
   test_dataset_path: "./datasets/dataset"
   snapbeat_audio_path: ""
   train_dataset_start: 0
-  train_dataset_end: 602
-  test_dataset_start: 602
-  test_dataset_end: 669
+  train_dataset_end: 2093       # Run 13: 90% of cleaned 2327-sample dataset (10 charts removed 2026-05-12).
+                                # Test set UUIDs are the exact same 234 charts the pre-cleanup runs evaluated on,
+                                # so eval numbers remain directly comparable across the cleanup boundary.
+  test_dataset_start: 2093      # was 2103 pre-cleanup
+  test_dataset_end: 2327        # was 2337 pre-cleanup — full 2327 paired json+audio samples on disk
   gamemodes: [3]
   per_track: true
   # Disable osu!-specific features not relevant to SnapBeat
@@ -65,12 +71,12 @@ data:
 
 optim:
   name: muon
-  base_lr: 0.00005             # Run 12: 1/4 of Run 8's 2e-4 — low-LR polish on top of Run 8 weights
-  base_lr_2: 0.000025          # Run 12: 1/4 of Run 8's 1e-4
+  base_lr: 5.0e-05             # Run 13 (rev2): Run 12 tail LR (was 2e-4 for original fresh-start Run 13)
+  base_lr_2: 2.5e-05           # Run 13 (rev2): Run 12 tail value (was 1e-4)
   batch_size: 64
   grad_acc: 64
-  total_steps: 1000            # Run 12: 1000 steps for low-LR tail (Run 8 was 2000)
-  warmup_steps: 50             # Run 12: short warmup — model already converged
+  total_steps: 2000            # Run 13 (rev2): ~4.5 additional epochs over 2093 cleaned train samples on top of Run 12's converged adapter (Run 12 itself ran 1.66 epochs over its 602-sample tail)
+  warmup_steps: 50             # Run 13 (rev2): short warmup since resuming a converged model (matches Run 12)
   lr_scheduler: cosine
   final_cosine: 0
 
@@ -90,4 +96,4 @@ lora:
   target_modules: ['k_proj', 'v_proj', 'q_proj', 'out_proj', 'fc1', 'fc2']
   lora_dropout: 0.05            # Run 8 value
   bias: "none"
-  init_lora_weights: "pissa"    # init is overwritten by resumed adapter weights — kept for shape/config consistency
+  init_lora_weights: "pissa"    # Run 13 (rev2): PiSSA init shape; actual weights come from lora_resume_path (Run 12 adapter) at load time

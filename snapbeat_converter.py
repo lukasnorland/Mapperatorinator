@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -15,7 +14,7 @@ def osu_mania_to_snapbeat(
     song_name: str = "Generated",
     audio_path: str = "",
     n_lanes: int = 4,
-    visual_speed: float = 4.5,
+    visual_speed: Optional[float] = None,
     max_simultaneous: int = 2,
     game_code: str = "MT3",
 ) -> dict:
@@ -26,7 +25,7 @@ def osu_mania_to_snapbeat(
         song_name: Value for songMeta.songName.
         audio_path: Value for songMeta.audioPath.
         n_lanes: Number of playable lanes (written to songMeta.nLanes).
-        visual_speed: Scroll speed written to songMeta.visualSpeed.
+        visual_speed: Scroll speed for songMeta.visualSpeed. If omitted, uses ``bpm / 30``.
         max_simultaneous: Maximum simultaneous notes allowed per timestamp.
         game_code: SnapBeat game code written to the top-level `format` field
             (e.g. "MT3", "BH", "DR").
@@ -38,10 +37,11 @@ def osu_mania_to_snapbeat(
     key_count = int(beatmap.circle_size)
 
     bpm = _extract_bpm(beatmap)
+    resolved_vs = float(visual_speed) if visual_speed is not None else float(bpm) / 30.0
     hit_objects = beatmap.hit_objects(stacking=False)
 
     if not hit_objects:
-        return _empty_snapbeat(song_name, audio_path, bpm, n_lanes, visual_speed, game_code)
+        return _empty_snapbeat(song_name, audio_path, bpm, n_lanes, resolved_vs, game_code)
 
     last_ho = hit_objects[-1]
     end_time = last_ho.end_time if isinstance(last_ho, HoldNote) else last_ho.time
@@ -55,7 +55,6 @@ def osu_mania_to_snapbeat(
     return {
         "version": "1.3",
         "format": game_code,
-        "lastModified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": notes,
         "songMeta": {
             "songName": song_name,
@@ -66,7 +65,7 @@ def osu_mania_to_snapbeat(
             "audioDuration": audio_duration,
             "nLanes": n_lanes,
             "nLanesMeta": n_lanes,
-            "visualSpeed": visual_speed,
+            "visualSpeed": resolved_vs,
         },
         "snapBeatMeta": {"showInfoPanel": True},
     }
@@ -215,7 +214,6 @@ def _empty_snapbeat(
     return {
         "version": "1.3",
         "format": game_code,
-        "lastModified": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "notes": [],
         "songMeta": {
             "songName": song_name,

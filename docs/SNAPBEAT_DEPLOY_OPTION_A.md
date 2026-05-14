@@ -14,7 +14,7 @@ into a SnapBeat JSON chart. No HTTP server, no long-running process — one
 | Item | Source | Notes |
 |---|---|---|
 | Source code + `Dockerfile.deploy` | GitHub repo `lukasnorland/Mapperatorinator`, branch `amaremix` | Pin to a specific commit SHA for reproducible builds (see §3). |
-| HuggingFace token (`HF_TOKEN`) | Shared privately (1Password / Vault / ticket) | Fine-grained, scoped to `Read` on `lukasnorland/rhythm-skeleton-mt3-v1` only. Required at **build** time; not needed at runtime. |
+| HuggingFace token (`HF_TOKEN`) | Shared privately (1Password / Vault / ticket) | Fine-grained, scoped to `Read` on `lukasnorland/rhythm-skeleton-mt3-v2` only. Required at **build** time; not needed at runtime. |
 | Smoke-test stdout | Attached to handoff ticket | Proves the image produces valid SnapBeat JSON on a known input. |
 
 ---
@@ -76,14 +76,14 @@ AWS Secrets Manager, etc.) and export it into the build job environment.
 DOCKER_BUILDKIT=1 docker build \
   -f Dockerfile.deploy \
   --secret id=hf_token,env=HF_TOKEN \
-  -t snapbeat-lora:mt3-v1 .
+  -t snapbeat-lora:mt3-v2 .
 ```
 
 - `--secret id=hf_token,env=HF_TOKEN` mounts the token on a tmpfs inside a
   single `RUN` step and **never writes it to a layer**. You can verify after
   the build with:
   ```bash
-  docker history --no-trunc snapbeat-lora:mt3-v1 | grep -oE 'hf_[A-Za-z0-9]{30,}' \
+  docker history --no-trunc snapbeat-lora:mt3-v2 | grep -oE 'hf_[A-Za-z0-9]{30,}' \
     && echo "LEAK" || echo "CLEAN"
   ```
   Expected output: `CLEAN`.
@@ -104,7 +104,7 @@ Reproducibility for image-only rebuilds (deps bump, Dockerfile fix, same LoRA)
 comes from the **git commit SHA** the build was run against — recorded in the
 handoff ticket — not from a tag suffix. If you ever need two image-only
 rebuilds of the same LoRA pullable side by side (rare in this setup), append
-the short SHA: `snapbeat-lora:mt3-v1-7ae1d86`.
+the short SHA: `snapbeat-lora:mt3-v2-7ae1d86`.
 
 ---
 
@@ -117,7 +117,7 @@ mkdir -p /srv/snapbeat/in /srv/snapbeat/out
 docker run --rm --gpus all \
   -v /srv/snapbeat/in:/in:ro \
   -v /srv/snapbeat/out:/out \
-  snapbeat-lora:mt3-v1 \
+  snapbeat-lora:mt3-v2 \
   audio_path=/in/song.mp3 output_path=/out
 ```
 
@@ -150,7 +150,7 @@ Example with overrides:
 ```bash
 docker run --rm --gpus all \
   -v /srv/snapbeat/in:/in:ro -v /srv/snapbeat/out:/out \
-  snapbeat-lora:mt3-v1 \
+  snapbeat-lora:mt3-v2 \
   audio_path=/in/song.mp3 output_path=/out \
   difficulty=5.0 seed=42 precision=bf16
 ```
@@ -204,7 +204,7 @@ Fall back to stock attention: `precision=fp32 attn_implementation=sdpa`.
 Usually happens on older drivers or non-Ampere/Ada GPUs.
 
 **`403 Forbidden` during build from HuggingFace**
-The `HF_TOKEN` lacks read access to `lukasnorland/rhythm-skeleton-mt3-v1`. The
+The `HF_TOKEN` lacks read access to `lukasnorland/rhythm-skeleton-mt3-v2`. The
 token must be a fine-grained token with **Read** on that specific repo. The
 classic "read all public repos" tokens will NOT work on a private repo.
 
@@ -252,11 +252,11 @@ git pull --ff-only
 # changelog.
 DOCKER_BUILDKIT=1 docker build \
   -f Dockerfile.deploy --secret id=hf_token,env=HF_TOKEN \
-  -t snapbeat-lora:mt3-v1 .
+  -t snapbeat-lora:mt3-v2 .
 ```
 
 If you need to keep the old image pullable (e.g. an in-flight rollback window),
-suffix the tag with the short SHA on either side: `snapbeat-lora:mt3-v1-7ae1d86`.
+suffix the tag with the short SHA on either side: `snapbeat-lora:mt3-v2-7ae1d86`.
 
 ### B. New LoRA version of the same game (e.g. `mt3-v2` ships)
 
@@ -311,9 +311,9 @@ needed — just re-run the build with the new `HF_TOKEN`.
 flowchart LR
   backend["Backend service"]
   audioIn["/srv/snapbeat/in/song.mp3"]
-  docker["docker run snapbeat-lora:mt3-v1"]
+  docker["docker run snapbeat-lora:mt3-v2"]
   entrypoint["snapbeat_inference.py"]
-  model["Mapperatorinator v31 + rhythm-skeleton-mt3-v1"]
+  model["Mapperatorinator v31 + rhythm-skeleton-mt3-v2"]
   osu[".osu intermediate"]
   converter["snapbeat_converter"]
   jsonOut["/srv/snapbeat/out/song_snapbeat.json"]
@@ -327,7 +327,7 @@ flowchart LR
 
 ## 12. Security notes
 
-- The image embeds the private `rhythm-skeleton-mt3-v1` LoRA weights. If you
+- The image embeds the private `rhythm-skeleton-mt3-v2` LoRA weights. If you
   push the built image to an internal registry, the registry repository
   **must be private**. Anyone with `docker pull` access can extract weights
   with `docker save`.
@@ -352,7 +352,7 @@ Smoke-test command used at handoff (reference):
 ```bash
 docker run --rm --gpus all \
   -v "$PWD/test:/in:ro" -v "$PWD/out:/out" \
-  snapbeat-lora:mt3-v1 \
+  snapbeat-lora:mt3-v2 \
   audio_path=/in/demo.mp3 output_path=/out
 # Exit code: 0
 # Output: out/demo_snapbeat.json — valid JSON, format: "MT3", notes non-empty.

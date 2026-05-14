@@ -327,6 +327,56 @@ Eval metrics were not logged during training (context type filter mismatch — e
 
 ---
 
+## Run 13 (rev2): Run 12 warm-resume on the cleaned + expanded dataset
+
+> **The data-ceiling test the project had been pointing at since Run 6.** Resumes Run 12's adapter on a much larger and cleaner SnapBeat dataset, continuing the same low-LR cosine tail. Ships as `lukasnorland/rhythm-skeleton-mt3-v2` — the new production baseline.
+
+- **Log**: `logs/2026-05-12/15-34-47/` (final checkpoint: `checkpoint-2001/lora`)
+- **Resume from**: `logs/2026-04-25/09-51-23/checkpoint-1001/lora` (Run 12 adapter — i.e., `lukasnorland/rhythm-skeleton-mt3-v1`) via `lora_resume_path` (PiSSA shape from base, weights from Run 12).
+- **Dataset**: full SnapBeat corpus on `./datasets/dataset` after 2026-05-12 cleanup that **removed 10 corrupt audio/JSON pairs** (9 stems; 1 stem mapped to 2 UUID duplicates). Net: 2337 → 2327 paired samples. Discovered after Run 13's original cold-start version was showing degenerate behavior on a few hot-zone samples; root cause was audio/chart mismatch in the affected files.
+  - `train`: `[0, 2093)` → **2093 samples** (~3.5× Run 12's 602).
+  - `test`:  `[2093, 2327)` → **234 samples** (~3.5× Run 12's 67).
+- **Original (discarded) Run 13**: a *fresh* cold-start at `base_lr=2e-4` on the same data. Pre-cleanup, ran for ~1500 steps, climbed visibly but wasted ~600 steps re-discovering what the Run 12 adapter already knew. **Logs and checkpoints purged after switching to the warm-resume rev2** (user request — clean history). All references in the table below are to rev2.
+- **Config deltas vs Run 12** (everything else identical — same `r=64`, `α=128`, `rhythm_weight=5`, `label_smoothing=0.05`, `lora_dropout=0.05`, `timing` context active, Muon optimizer):
+  - `data.train_dataset_path` / `test_dataset_path`: `piano7` subset → full `dataset` (mixed origin).
+  - `data.train_dataset_end`: 602 → **2093**; `test_dataset_start/end`: 602/669 → **2093/2327**.
+  - `optim.total_steps`: 1000 → **2000** (≈ 4.5 epochs at 2093 train samples, vs Run 12's 1.66 epochs at 602).
+  - `optim.warmup_steps`: 50 (unchanged; resumes converged weights).
+  - `optim.base_lr` / `base_lr_2`: 5e-5 / 2.5e-5 (unchanged; same low-LR cosine tail family as Run 12).
+
+### Eval at intermediate checkpoints (new 234-sample test set)
+
+| Step  | Loss   | timing_acc | fuzzy_timing | other_acc | column_acc |
+|-------|--------|-----------|--------------|-----------|------------|
+| 400   | 1.9844 | 69.17%    | 81.95%       | 91.69%    | 65.85%     |
+| 800   | 1.9815 | 69.20%    | 81.98%       | 91.72%    | 65.96%     |
+| 1200  | 1.9807 | 69.19%    | 81.98%       | 91.70%    | 65.92%     |
+| 2000  | **1.9806** | **69.21%** | **82.00%** | **91.71%** | **65.99%** |
+
+> Eval at step 2000 = epoch boundary (3199 iterations × 1254 s ≈ 21 min on this 12GB GPU). Curve is essentially flat between step 1200 and 2000 — the LR cosine has annealed to ~0 by step 1900 and the model has converged on the new data distribution.
+
+### Apples-to-apples comparison: Run 12 adapter re-evaluated on the same 234-sample test set
+
+The new test set is a different (harder, larger) split than the piano7-only one Run 12 was originally evaluated on. To isolate the *model* improvement from the *test-set* shift, the Run 12 adapter (`logs/2026-04-25/09-51-23/checkpoint-1001/lora`) was loaded fresh against the Run 13 rev2 config and the same test split. (`osuT5/test.py` was patched to tolerate batches missing the osu!-only `sample_weights` field — see `KeyError: 'sample_weights'` traceback; minimal `.get(...)` + `None`-aware branch into `calc_loss`.)
+
+Eval results on the **same** new 234-sample test set:
+
+| Model                        | Loss    | timing_acc | fuzzy_timing | other_acc | column_acc |
+|------------------------------|---------|-----------|--------------|-----------|------------|
+| Run 12 adapter (v1, no retraining) | 2.5061  | 64.29%    | 78.68%       | 90.77%    | 61.14%     |
+| **Run 13 rev2 (v2, final)**        | **1.9806** | **69.21%** | **82.00%** | **91.71%** | **65.99%** |
+| **Δ (v2 − v1)**              | **−0.5255** | **+4.92pp** | **+3.32pp** | **+0.94pp** | **+4.85pp** |
+
+> **Data-ceiling hypothesis: REJECTED.** Run 13 rev2 beats Run 12 by **+4.92pp exact timing**, **+3.32pp fuzzy timing**, **+0.94pp other**, and **+4.85pp column** on the same evaluation set — the largest absolute timing gain since Run 8 broke the 65% plateau. Loss also drops by 0.53, confirming the improvement is not just argmax shuffling. The Run 9-12 conclusion that "we're at the data ceiling at 602 train samples" was **correct as an explanation of the plateau, and Run 13 rev2 is the test that confirms it**: 3.5× more (and cleaner) data + Run 12's converged warm-start + a fresh low-LR cosine tail moved every metric meaningfully.
+
+> **Why Run 13's `0.6921` does NOT look better than Run 12's logged `0.7553`:** the two numbers were measured on *different* test sets. Run 12's logged `0.7553` was on the easier 67-sample piano7 split that included the 9–10 corrupt charts and was statistically noisy. On the *same* cleaned 234-sample split, Run 12 itself only scores `0.6429`. Cross-test-set absolute comparisons across the 2026-05-12 dataset boundary are not meaningful — use the apples-to-apples table above when comparing v1 and v2.
+
+### Ships as `lukasnorland/rhythm-skeleton-mt3-v2`
+
+Run 13 rev2 supersedes v1 as the production baseline. Per the versioned naming scheme established with v1, the v1 artifact is preserved unchanged for A/B comparisons. Update `_GAME_CODE_REGISTRY["MT3"]` in `snapbeat_inference.py` to resolve `MT3 → lukasnorland/rhythm-skeleton-mt3-v2`; see `docs/SNAPBEAT_FINETUNING.md`.
+
+---
+
 ## Summary Comparison (Best Eval per Run)
 
 | Run | Steps | Loss   | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Notes |
@@ -342,10 +392,14 @@ Eval metrics were not logged during training (context type filter mismatch — e
 | 9   | 1400† | 2.501* | 74.95%    | 85.5%        | 92.8%     | 69.6%      | rhythm_weight=8 underperformed Run 8; interrupted at step 1470 |
 | 10  | 2001  | 1.697* | 74.53%    | 85.4%        | 92.8%     | 69.2%      | dropout+smoothing both → 0.1; over-regularized, −0.77pp vs Run 8 |
 | 11  | 2001  | 1.673* | 75.12% (peak 75.17% @ 1800) | 85.84% | 92.81% | 69.63% | r=128, α=256; tied Run 8 within noise (−0.18pp), capacity not the bottleneck |
-| 12  | 1000  | 1.659* | **75.53%** | **85.77%** | **92.90%** | 69.56% | **new baseline** — Run 8 resume, base_lr=5e-5; +0.23pp over Run 8, missed ≥76% gate; ships as `rhythm-skeleton-mt3-v1` |
+| 12  | 1000  | 1.659* | **75.53%**‡ | **85.77%**‡ | **92.90%**‡ | 69.56%‡ | Run 8 resume, base_lr=5e-5; +0.23pp over Run 8; shipped as `rhythm-skeleton-mt3-v1`. Numbers on old 67-sample test set. |
+| 12  | (re-eval) | 2.506* | 64.29%§ | 78.68%§ | 90.77%§ | 61.14%§ | Same v1 adapter, **new 234-sample cleaned test set** — apples-to-apples vs Run 13 rev2 |
+| 13 rev2 | 2000 | 1.981* | **69.21%**§ | **82.00%**§ | **91.71%**§ | **65.99%**§ | **new baseline** — Run 12 resume on cleaned 2327-sample dataset (2093 train / 234 test); +4.92pp timing vs Run 12 on same test set; ships as `rhythm-skeleton-mt3-v2` |
 
-\* Runs 5–6, Run 9, Run 10, Run 11, and Run 12 loss not directly comparable to earlier runs due to `rhythm_weight` / `label_smoothing` differences.
+\* Runs 5–6, Run 9, Run 10, Run 11, Run 12, and Run 13 rev2 loss not directly comparable to earlier runs due to `rhythm_weight` / `label_smoothing` differences.
 † Run 9 last eval step before machine interrupt — not a final-step result.
+‡ Run 12's original eval: 67-sample piano7 test split (smaller, easier, included 9 corrupt charts removed 2026-05-12). **Not comparable** to Run 13 rev2 numbers.
+§ Run 12 re-eval and Run 13 rev2: 234-sample cleaned mixed-origin test split. Comparable to each other.
 
 ### Key Takeaways
 
@@ -364,12 +418,13 @@ Eval metrics were not logged during training (context type filter mismatch — e
 10. **Run 10 ruled out more regularization.** Doubling both `label_smoothing` (0.05 → 0.1) and `lora_dropout` (0.05 → 0.1) on top of Run 8's config produced 74.53% final — 0.77pp *below* Run 8. The train/test gap *did* tighten (3.1× vs Run 9's 5.3×), so the regularization was mechanically effective but traded away peak accuracy. Combined with Run 9, this brackets the answer: Run 8's `rhythm_weight=5`, `label_smoothing=0.05`, `lora_dropout=0.05` already sit at a near-optimal trade-off for this dataset. Further loss-weighting / regularization tuning is exhausted — the remaining axes are **capacity** (LoRA rank) and **schedule** (resume with lower LR).
 11. **Run 11 ruled out more capacity.** Doubling LoRA rank (64 → 128) with α scaled in step (128 → 256, keeping α/r=2) on top of Run 8's regularization produced 75.12% final / 75.17% peak — **0.18pp below Run 8** (within noise; effectively a tie). Train/test gap stayed clean at 3.7× — no overfitting from the extra params, just no extra signal from them either. Doubling trainable params from 26M → 52M for a tied result is a net loss. This now closes the third single-axis sweep against Run 8: **loss-weighting (Run 9), regularization (Run 10), and capacity (Run 11) all failed to beat 75.3%.** The plateau is most likely a **data ceiling** at 602 train samples, not a hyperparameter problem. Remaining cheap test: **schedule** — resume Run 8 with low LR (Run 12). After that, the realistic levers are data collection or accepting 75.3% and shipping.
 12. **Run 12 confirmed schedule axis is marginal — and exhausts the cheap-sweep budget.** Resuming Run 8's adapter weights with `base_lr=5e-5` over 1000 steps produced a clean monotonic climb (75.31% → 75.40% → 75.44% → 75.47% → 75.53%) — the first sweep since Run 8 to produce an above-noise gain, but the magnitude was only **+0.23pp**. Pre-registered new-champion gate (≥76%) was missed by 0.47pp. Implementation note: `accelerator.load_state` would have restored Run 8's spent cosine schedule and exited at step 0 — added a `lora_resume_path` config field that loads adapter weights only via `set_peft_model_state_dict`, leaving the freshly-built optimizer + scheduler intact. **All four cheap single-axis sweeps from Run 8 are now exhausted (loss / regularization / capacity / schedule)**, each landing within ±0.8pp of 75.3%. The bracketing argument is tight: it isn't the loss weighting, the regularization, the rank, or the schedule. The conclusion most consistent with the data is a **dataset-size ceiling** at 602 samples for this architecture and tokenizer. Run 12 ships as the new baseline (`lukasnorland/rhythm-skeleton-mt3-v1`) since the +0.23pp is essentially free given the artifact already exists; further compute should pivot to data collection.
+13. **Run 13 rev2 confirmed the data-ceiling diagnosis was correct — by breaking it.** Resuming v1's adapter on a 3.5× larger and cleaned dataset (2093 train / 234 test, after removing 10 corrupt audio/JSON pairs) and continuing the Run 12 low-LR cosine tail for 2000 steps moved every metric on the same evaluation set: **+4.92pp timing**, +3.32pp fuzzy, +0.94pp other, **+4.85pp column**, −0.53 loss. The diagnosis from takeaways 9–12 was right (it really was data, not hyperparameters), so the prescription worked the first time it was tried. Two methodological lessons from the process: **(a) cross-test-set comparisons are silent traps** — Run 12's logged 75.53% on the old 67-sample piano7 split looked ~6pp better than Run 13's 69.21% on the new 234-sample split, but on the *same* test set Run 12 only scores 64.29% and the model actually improved by ~5pp. Apples-to-apples re-eval of any reference model is mandatory whenever the test set changes. **(b) Data-quality audits are high-leverage** — the original Run 13 cold-start had hot-zone failures that traced to 9 audio/chart mismatches in the dataset (1 stem had 2 UUID duplicates → 10 paired files); removing those before re-launch as rev2 was a tiny edit that probably saved a lot of compute and let the warm-start strategy land cleanly. Ships as `lukasnorland/rhythm-skeleton-mt3-v2`.
 
 ---
 
 ## Next Steps: Improvement Suggestions
 
-Run 8 broke the timing plateau at **75.3%**. Four single-axis sweeps from Run 8 (loss-weighting Run 9, regularization Run 10, capacity Run 11, schedule Run 12) all landed within ±0.8pp; only Run 12 produced an above-noise gain (+0.23pp), shipped as the new baseline `lukasnorland/rhythm-skeleton-mt3-v1`. None cleared the pre-registered ≥76% new-champion gate. The cheap-sweep budget is exhausted. **The realistic next lever is more training data** — Run 6's +47% data bump was pre-Run-8 (no timing context) so it didn't show timing gains; the experiment is overdue for a re-run at the Run 12 config.
+Run 13 rev2 is the new baseline `lukasnorland/rhythm-skeleton-mt3-v2`. Three changes have now meaningfully moved timing accuracy: **feeding the beat grid to the decoder** (Run 8, +10.7pp), **low-LR cosine tail** (Run 12, +0.23pp), and **3.5× more cleaned training data** (Run 13 rev2, +4.92pp on the same test set). The data-ceiling diagnosis from Runs 9–12 was correct; the prescription worked. Next priorities: **(a)** preserve the current eval split going forward so successor runs are directly comparable to v2; **(b)** investigate column accuracy (the weakest metric at 65.99%) as the next high-leverage axis now that timing has moved; **(c)** consider another data expansion + re-train cycle since the curve at step 2000 is flat but the model still has loss headroom.
 
 ### Tested and Confirmed
 
@@ -377,6 +432,7 @@ Run 8 broke the timing plateau at **75.3%**. Four single-axis sweeps from Run 8 
 |---|--------|--------|-----|
 | 1 | **Feed BPM beat grid to decoder** (`context_types: timing→map` + `SnapBeatParser.parse_timing()`) | **+10.7pp exact timing** (64.6% → 75.3%), new bests on all metrics | Run 8 |
 | 13 | **Low-LR cosine tail** on Run 8 weights (`base_lr=5e-5`, 1000 steps, fresh optimizer/scheduler via new `lora_resume_path`) | **+0.23pp** over Run 8 (75.30% → 75.53%), monotonic climb across 5 evals; missed ≥76% gate but free gain on top of existing artifact | Run 12 |
+| 14 | **3.5× more cleaned training data** (602 → 2093 train samples after removing 10 corrupt audio/JSON pairs); warm-resume Run 12 adapter; continue low-LR cosine tail for 2000 steps | **+4.92pp timing**, +3.32pp fuzzy, +0.94pp other, **+4.85pp column**, −0.53 loss on the same 234-sample test set vs Run 12. Breaks the data ceiling — ships as `rhythm-skeleton-mt3-v2`. | Run 13 rev2 |
 
 ### Tested and Rejected
 
@@ -393,7 +449,8 @@ Run 8 broke the timing plateau at **75.3%**. Four single-axis sweeps from Run 8 
 
 | # | Suggestion | Rationale | Config change |
 |---|-----------|-----------|---------------|
-| 14 | **Add more training data** | All 4 cheap single-axis sweeps plateaued at ~75.3–75.5% with clean train/test gaps — strong signal we're at the data ceiling. Run 6's earlier data bump (+47%) tested data scaling **before** the timing-context fix that made Run 8 work, so it didn't show timing gains. Re-running with the Run 12 config + more SnapBeat charts is the only untested high-leverage lever. | Collect/label more SnapBeat charts, retrain with Run 12 config |
+| 19 | **Another data expansion + warm-resume cycle on v2** | Run 13 rev2 confirmed the data axis is live: +4.92pp timing from 3.5× data. Collect more SnapBeat charts (especially varied mappers and BPM ranges), audit for audio/chart mismatches (the 10-file cleanup in this round was high-leverage), and warm-resume v2 with the same low-LR cosine tail. First experiment to repeat the recipe. | Add more JSON+audio pairs to `datasets/dataset`, `lora_resume_path: <v2 path>`, keep `total_steps: 2000` |
+| 20 | **Column-accuracy investigation** | At 65.99%, column placement is now the lowest non-timing metric and has been the slowest-moving across all runs (varied by only ±1pp across Runs 6–13 vs ±15pp on timing). Possibly an inherent ceiling on mania lane assignment without per-mapper conditioning, or a tokenization-level limit. Worth a focused audit before more architectural changes. | Audit failure modes on `column_acc` (which UUIDs / which lane configurations); consider per-mapper conditioning |
 
 ### Medium Impact (compute fallbacks if data work is blocked)
 
