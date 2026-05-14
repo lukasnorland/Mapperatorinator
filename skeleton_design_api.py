@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,26 @@ from flask import Flask, Response, request
 
 APP_ROOT = Path(__file__).resolve().parent
 TMP_ROOT = APP_ROOT / "tmp"
+
+log = logging.getLogger(__name__)
+
+
+def _configure_logging() -> None:
+    level_name = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
+    level = getattr(logging, level_name, logging.INFO)
+    log.setLevel(level)
+    if log.handlers:
+        return
+    h = logging.StreamHandler(sys.stderr)
+    h.setLevel(level)
+    h.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
+    )
+    log.addHandler(h)
+    log.propagate = False
+
+
+_configure_logging()
 
 app = Flask(__name__)
 
@@ -66,7 +87,8 @@ def _redis_client() -> redis.Redis | None:
         )
         r.ping()
         return r
-    except Exception:
+    except Exception as e:
+        log.warning("Redis unavailable, caching disabled (%s:%s): %s", REDIS_HOST, REDIS_PORT, e)
         return None
 
 
@@ -174,11 +196,18 @@ def snapbeat_sse() -> Response:
     body = request.get_json(silent=True) or {}
     audio_url = (body.get("audio_url") or "").strip()
     if not audio_url:
+        log.warning("POST /api/skeleton-design rejected: missing audio_url")
         return Response(_sse("error", {"message": "Missing audio_url"}), mimetype="text/event-stream")
 
     job_id = uuid.uuid4().hex
     song_name = _song_name_from_audio_url(audio_url)
     filename = _filename_from_audio_url(audio_url)
+    log.info(
+        "POST /api/skeleton-design job_id=%s song_name=%s audio_url=%s",
+        job_id,
+        song_name,
+        audio_url,
+    )
 
     def generate() -> Iterator[str]:
         r: redis.Redis | None = None
@@ -186,6 +215,10 @@ def snapbeat_sse() -> Response:
         try:
             yield _sse("status", {"stage": "init", "job_id": job_id, "song_name": song_name, "audio_url": audio_url})
             r = _redis_client()
+            if r is not None:
+                log.info("job_id=%s redis=connected cluster=%s tls=%s", job_id, REDIS_CLUSTER_MODE, REDIS_TLS)
+            else:
+                log.info("job_id=%s redis=disabled (unreachable or misconfigured)", job_id)
             yield _sse("status", {"stage": "download", "audio_url": audio_url})
 
             # Download into a per-job folder first so we can hash the bytes.
@@ -194,10 +227,16 @@ def snapbeat_sse() -> Response:
             output_path = job_dir
 
             _download_audio(audio_url, audio_path)
+            try:
+                sz = audio_path.stat().st_size
+            except OSError:
+                sz = -1
+            log.info("job_id=%s download_done path=%s bytes=%s", job_id, audio_path, sz)
             yield _sse("status", {"stage": "download_done", "audio_path": str(audio_path)})
 
             hashcode_full = _file_sha256(audio_path)
             hashcode = hashcode_full[:16]
+            log.info("job_id=%s hash_computed hashcode=%s", job_id, hashcode)
             yield _sse("status", {"stage": "hash_computed", "hashcode": hashcode, "audio_url": audio_url})
 
             # Content-addressed keys (same bytes → same hash): reuse across jobs without duplicate storage.
@@ -238,11 +277,18 @@ def snapbeat_sse() -> Response:
                         else:
                             results_out = cached_parsed
                             out_audio_url = audio_url
+                        log.info("job_id=%s cache_hit hashcode=%s key=%s", job_id, hashcode, redis_results_key)
                         yield _sse("end", {"status": "success", "results": results_out, "audio_url": out_audio_url})
                         return
-                    except Exception:
+                    except Exception as cache_err:
                         # If cache is corrupted, ignore and recompute.
-                        pass
+                        log.warning(
+                            "job_id=%s cache_corrupt hashcode=%s key=%s: %s",
+                            job_id,
+                            hashcode,
+                            redis_results_key,
+                            cache_err,
+                        )
                 r.setex(
                     redis_status_key,
                     REDIS_TTL_SECONDS,
@@ -258,6 +304,7 @@ def snapbeat_sse() -> Response:
                 )
 
             yield _sse("status", {"stage": "inference_start"})
+            log.info("job_id=%s inference_start audio_path=%s", job_id, audio_path)
 
             # Stream subprocess output as log events.
             proc = subprocess.Popen(
@@ -275,6 +322,7 @@ def snapbeat_sse() -> Response:
                 universal_newlines=True,
             )
             assert proc.stdout is not None
+            log.info("job_id=%s inference_subprocess pid=%s", job_id, proc.pid)
 
             # Non-blocking stdout reader that can handle tqdm-style '\r' updates.
             sel = selectors.DefaultSelector()
@@ -337,8 +385,15 @@ def snapbeat_sse() -> Response:
 
             proc.stdout.close()
             exit_code = proc.wait()
+            log.info("job_id=%s inference_subprocess_finished exit_code=%s", job_id, exit_code)
 
             if exit_code != 0:
+                log.error(
+                    "job_id=%s inference_failed exit_code=%s audio_url=%s",
+                    job_id,
+                    exit_code,
+                    audio_url,
+                )
                 if r is not None:
                     r.setex(
                         redis_status_key,
@@ -364,6 +419,7 @@ def snapbeat_sse() -> Response:
             # <audio_stem>_snapbeat.json in output_path.
             snapbeat_json_path = output_path / f"{audio_path.stem}_snapbeat.json"
             if not snapbeat_json_path.exists():
+                log.error("job_id=%s missing_output path=%s", job_id, snapbeat_json_path)
                 if r is not None:
                     r.setex(
                         redis_status_key,
@@ -403,13 +459,16 @@ def snapbeat_sse() -> Response:
                     json.dumps({"status": "success", "job_id": job_id, "song_name": song_name, "audio_url": audio_url}),
                 )
 
+            log.info("job_id=%s inference_success hashcode=%s json=%s", job_id, hashcode, snapbeat_json_path)
             yield _sse("end", {"status": "success", "results": snapbeat_obj, "audio_url": audio_url})
         except requests.RequestException as e:
+            log.error("job_id=%s download_failed: %s", job_id, e, exc_info=log.isEnabledFor(logging.DEBUG))
             yield _sse(
                 "end",
                 {"status": "error", "message": "Download failed", "detail": str(e), "audio_url": audio_url},
             )
         except Exception as e:
+            log.exception("job_id=%s unhandled_error", job_id)
             yield _sse(
                 "end",
                 {"status": "error", "message": "Unhandled error", "detail": str(e), "audio_url": audio_url},
@@ -433,5 +492,6 @@ if __name__ == "__main__":
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     # Bind to all interfaces for containerized deployment.
     port = int(os.environ.get("PORT", "8080"))
+    log.info("Listening on 0.0.0.0:%s (LOG_LEVEL=%s)", port, logging.getLevelName(log.getEffectiveLevel()))
     app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
 
