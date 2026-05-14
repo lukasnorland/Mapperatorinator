@@ -10,9 +10,11 @@ Related operational docs: [SNAPBEAT_FINETUNING.md](SNAPBEAT_FINETUNING.md), [SNA
 
 **Supervised sequence modeling.** The model learns a conditional distribution over **discrete chart tokens** given **audio**:
 
-\[
-P(\text{tokens} \mid \text{audio}) \approx \prod_t P(x_t \mid x_{<t}, \text{audio}).
-\]
+```
+P(tokens | audio) ≈ ∏_t  P(x_t | x_<t, audio)
+```
+
+Read aloud: the probability of the whole token sequence given the audio factorizes as the product, over all time steps `t`, of the probability of each token `x_t` given the prior tokens `x_<t` and the audio. This is the chain rule applied to an autoregressive model.
 
 Training minimizes **cross-entropy** on next-token prediction. The chart is not predicted as raw JSON or pixels; it is predicted as a **sequence of event symbols** (timing, columns, note types, and so on) that downstream code can turn into `.osu` or SnapBeat JSON.
 
@@ -134,7 +136,7 @@ For **`whisper_small_v2`**, `input_features: true` and `project_encoder_input: f
 
 ### 3.1 Supervised learning and the generative view
 
-You have pairs \((\text{audio}, \text{token sequence})\). The network parameters \(\theta\) are tuned so that the predicted token distribution matches the ground truth under **cross-entropy**. The implementation uses a **per-class weight vector** so **rhythm-related tokens** contribute more to the loss (configurable `rhythm_weight`), reflecting that timing mistakes are particularly harmful for charts:
+You have pairs `(audio, token sequence)`. The network parameters `θ` are tuned so that the predicted token distribution matches the ground truth under **cross-entropy**. The implementation uses a **per-class weight vector** so **rhythm-related tokens** contribute more to the loss (configurable `rhythm_weight`), reflecting that timing mistakes are particularly harmful for charts:
 
 ```130:137:osuT5/osuT5/model/modeling_mapperatorinator.py
         class_weights = torch.ones(config.vocab_size)
@@ -153,7 +155,7 @@ Beatmaps are **event lists** (circle, hold, time shift, mania column, …). The 
 
 ### 3.3 Autoregressive modeling
 
-The decoder models \(P(x_t \mid x_{<t}, \text{encoder output})\). During **training**, **teacher forcing** exposes the decoder to the true prefix; the loss is applied on **shifted** labels. During **inference**, the model typically conditions on **its own** previous predictions, which can drift (exposure bias)—a standard topic in seq2seq generation.
+The decoder models `P(x_t | x_<t, encoder output)`. During **training**, **teacher forcing** exposes the decoder to the true prefix; the loss is applied on **shifted** labels. During **inference**, the model typically conditions on **its own** previous predictions, which can drift (exposure bias)—a standard topic in seq2seq generation.
 
 ### 3.4 Encoder–decoder structure and cross-attention
 
@@ -183,7 +185,7 @@ Many training configs inject **metadata** (difficulty, mapper, …) as extra emb
 ### 3.8 Transfer learning and LoRA
 
 - **Transfer learning:** initialize from **`OliBomby/Mapperatorinator-v31`** (pretrained on large osu! chart data), then adapt weights toward SnapBeat charts.
-- **LoRA (Low-Rank Adaptation):** instead of updating full weight matrices \(W\), train low-rank matrices \(A, B\) so the effective update is small-rank. Fewer trainable parameters → less GPU memory and often **stable** fine-tuning.
+- **LoRA (Low-Rank Adaptation):** instead of updating full weight matrices `W`, train low-rank matrices `A`, `B` so the effective update is small-rank (the LoRA update is `W ← W + B·A` with the inner dimension equal to the rank `r`). Fewer trainable parameters → less GPU memory and often **stable** fine-tuning.
 
 **Where LoRA is attached:** [`osuT5/train.py`](../osuT5/train.py) uses PEFT when `enable_lora` is true:
 
@@ -200,7 +202,7 @@ Many training configs inject **metadata** (difficulty, mapper, …) as extra emb
 
 **SnapBeat LoRA targets** (attention projections **and** MLP `fc1`/`fc2`) and hyperparameters live in [`configs/train/snapbeat_lora.yaml`](../configs/train/snapbeat_lora.yaml): rank `r: 64`, `lora_alpha: 128`, `init_lora_weights: "pissa"`, dropout `0.05`. Training-only weights are the adapters; the base checkpoint can stay frozen (depending on optimizer grouping).
 
-**Initialization (PiSSA).** `init_lora_weights: "pissa"` runs a truncated SVD of the targeted weight matrix at adapter-build time and seeds the rank-\(r\) factors \(A, B\) from the **top-\(r\) singular components**. The remaining residual replaces \(W\), so the adapter starts on a useful low-rank subspace rather than at zero. Practical effect for this project: the adapter does not have to spend early-training capacity rediscovering the dominant directions of the pretrained matrix, and reloading PiSSA-trained weights into a fresh PiSSA-shape adapter is a clean **round trip** (see warm-resume below).
+**Initialization (PiSSA).** `init_lora_weights: "pissa"` runs a truncated SVD of the targeted weight matrix at adapter-build time and seeds the rank-`r` factors `A`, `B` from the **top-`r` singular components**. The remaining residual replaces `W`, so the adapter starts on a useful low-rank subspace rather than at zero. Practical effect for this project: the adapter does not have to spend early-training capacity rediscovering the dominant directions of the pretrained matrix, and reloading PiSSA-trained weights into a fresh PiSSA-shape adapter is a clean **round trip** (see warm-resume below).
 
 **Warm-resuming an adapter from a prior run.** Naively calling `accelerator.load_state(<prior_checkpoint>)` restores not just the LoRA weights but also the **optimizer state and LR scheduler position**; if the prior run finished at `total_steps`, the resumed run will exit at step 0 because the cosine schedule already reached its endpoint. The project ships a `lora_resume_path` config field ([`osuT5/train.py`](../osuT5/train.py)) that bypasses this by loading **only** the adapter weights via PEFT's `set_peft_model_state_dict`, leaving the freshly-built optimizer + scheduler intact. This is what made it possible to chain Run 8 → Run 12 (`rhythm-skeleton-mt3-v1`) → Run 13 rev2 (`rhythm-skeleton-mt3-v2`): each later run takes the prior adapter as a starting point and runs its own cosine LR cycle. For a thesis writeup, this is a concrete example of a **systems-level fine-tuning detail** that determines whether an experiment is even possible to run, distinct from the modeling choices in §3.
 
