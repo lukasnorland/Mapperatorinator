@@ -169,7 +169,8 @@ def test(args: TrainConfig, accelerator: Accelerator, model, tokenizer, preprefi
                     ct_logits = outputs.logits[ct_index]
                     ct_preds = preds[ct_index]
                     ct_labels = labels[ct_index]
-                    ct_weights = batch["sample_weights"][ct_index]
+                    _sw = batch.get("sample_weights")
+                    ct_weights = _sw[ct_index] if _sw is not None else None
                     ct_rhythm_complexity = rhythm_complexity[ct_index] if rhythm_complexity is not None else None
                     ct_loss = calc_loss(loss_fn, ct_logits, ct_labels, ct_weights)
 
@@ -258,7 +259,10 @@ def main(args: TrainConfig):
     model = accelerator.prepare(model)
 
     args.data.sample_weights_path = "../../../datasets/rhythm_complexities.csv"
-    test(args, accelerator, model, tokenizer, "test_noise")
+    try:
+        test(args, accelerator, model, tokenizer, "test_noise")
+    except (KeyError, FileNotFoundError) as e:
+        logger.warning(f"Skipping test_noise pass (likely SnapBeat config without rhythm_complexities.csv): {e}")
 
     args.data.timing_random_offset = 0
     args.data.timing_random_offset_2 = 0

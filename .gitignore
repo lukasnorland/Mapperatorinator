@@ -24,6 +24,9 @@ venv/
 # Logs
 *.log
 logs/
+logs_fid
+multirun
+tensorboard_logs
 
 # Common ML artifacts
 wandb/
@@ -33,4 +36,10 @@ tensorboard/
 
 # Local scratch / API job artifacts
 tmp/
+*.lck
 
+# Project-specific
+datasets
+test
+test_inference.py
+test_inference_mai_mod.py

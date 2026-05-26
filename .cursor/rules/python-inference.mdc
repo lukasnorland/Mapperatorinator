@@ -1,0 +1,27 @@
+---
+description: Python and inference pipeline conventions
+globs: inference.py,config.py,diffusion_pipeline.py,web-ui.py,mai_mod*.py
+alwaysApply: false
+---
+
+# Inference & Python Conventions
+
+## Path Handling
+- Use `pathlib.Path` for file paths
+- `beatmap_path` can autofill `audio_path` and `output_path` from the .osu file
+- Validate `.osu` extension and file existence before loading
+
+## Config Flow
+1. Hydra loads base config from `configs/inference/`
+2. `InferenceConfig` dataclass in `config.py` defines schema
+3. Override with CLI: `python inference.py gamemode=0 difficulty=5.5`
+
+## Key Imports
+- `osuT5.osuT5.inference` — Preprocessor, Processor, Postprocessor, BeatmapConfig, GenerationConfig
+- `osuT5.osuT5.tokenizer.ContextType` — NONE, TIMING, KIAI, MAP, GD, NO_HS
+- `slider.Beatmap` — beatmap I/O
+
+## Error Handling
+- Use `assert_package_version()` for dependency checks
+- Raise `ValueError` for invalid paths/config
+- Use `get_default_logger()` for user-facing messages

@@ -1,0 +1,33 @@
+---
+description: Core project context and conventions for Mapperatorinator
+alwaysApply: true
+---
+
+# Mapperatorinator Project Context
+
+## What This Project Does
+Multi-model framework for generating osu! beatmaps from audio. Uses spectrogram inputs → osuT5 (transformer) → osu-diffusion for coordinate refinement.
+
+## Tech Stack
+- **Python 3.10** (later versions may break dependencies)
+- **PyTorch** (CUDA/ROCm/MPS)
+- **Hydra** for config (use override syntax: `key=value`)
+- **slider** (osu! beatmap parsing)
+- **transformers** (Whisper-derived encoder)
+
+## Key Entry Points
+- `inference.py` — beatmap generation
+- `web-ui.py` — GUI for inference
+- `mai_mod.py` / `mai_mod_ui.py` — AI modding tool
+- `osuT5/train.py` — model training
+- `osu_diffusion/train.py` — diffusion training
+
+## Important Paths
+- `configs/` — Hydra YAML configs (inference, train, model)
+- `osuT5/` — Main transformer model, tokenizer, inference pipeline
+- `osu_diffusion/` — Diffusion for position refinement
+- `classifier/` — Beatmap classifier
+- `rcomplexion/` — Additional model components
+
+## Config Convention
+Use `config.py` dataclasses (`InferenceConfig`, etc.) as source of truth. YAML configs override defaults via Hydra.

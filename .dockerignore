@@ -1,0 +1,70 @@
+# VCS / metadata
+.git
+.gitignore
+.gitattributes
+.github
+
+# IDE / editor
+.cursor
+.devcontainer
+.kiro
+.vscode
+.idea
+.DS_Store
+**/.DS_Store
+
+# Python bytecode and packaging junk
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+
+# Local virtualenvs (can be multi-GB)
+.venv/
+**/.venv/
+venv/
+**/venv/
+
+# Training / evaluation artifacts — can grow to multi-GB
+logs/
+datasets/
+wandb/
+outputs/
+checkpoints/
+SnapBeat format/
+
+# Dev-only top-level scripts — not imported by snapbeat_inference.py or inference.py
+web-ui.py
+mai_mod.py
+mai_mod_ui.py
+calc_fid.py
+collate_results.py
+fix_dataset.py
+push_to_hub.py
+cli_inference.sh
+
+# Training-only packages (imported only by calc_fid.py, rcomplexion/train.py, classifier/*)
+classifier/
+rcomplexion/
+
+# UI assets (used only by web-ui.py / mai_mod_ui.py)
+static/
+template/
+
+# Notebooks
+colab/
+**/*.ipynb
+
+# Dev-time compose file (dev Dockerfile is harmless but this is irrelevant inside the image)
+compose.yaml
+
+# Local scratch / smoke-test directories we sometimes create
+out/
+test/
+tmp/
+
+# Plan files (live under .cursor/ already excluded, but belt-and-suspenders)
+*.plan.md

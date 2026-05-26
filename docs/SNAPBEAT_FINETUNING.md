@@ -140,7 +140,7 @@ To use the fine-tuned LoRA checkpoint from HuggingFace (works on any machine):
 ```bash
 python snapbeat_inference.py \
   audio_path="song.mp3" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v2" \
   gamemode=3 keycount=4 difficulty=5.0
 ```
 
@@ -149,7 +149,7 @@ Or with a local checkpoint path (if training logs are available):
 ```bash
 python snapbeat_inference.py \
   audio_path="song.mp3" \
-  lora_path="logs/2026-04-25/09-51-23/checkpoint-1000/lora" \
+  lora_path="logs/2026-05-12/15-34-47/checkpoint-2001/lora" \
   gamemode=3 keycount=4 difficulty=5.0
 ```
 
@@ -162,23 +162,28 @@ python inference.py \
   audio_path="song.mp3" \
   output_path="./output/" \
   model_path="OliBomby/Mapperatorinator-v31" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v2" \
   gamemode=3 difficulty=5.0
 ```
 
 **Available checkpoints** (see [SNAPBEAT_TRAINING_RESULTS.md](SNAPBEAT_TRAINING_RESULTS.md) for full eval metrics):
 
-| Checkpoint | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Notes |
-|------------|-----------|--------------|-----------|------------|-------|
-| `lukasnorland/rhythm-skeleton-mt3-v1` | **75.5%** | **85.8%** | **92.9%** | 69.6% | **Current baseline** — Run 12 (Run 8 + low-LR cosine tail) |
-| `logs/2026-04-25/09-51-23/checkpoint-1000/lora` | 75.5% | 85.8% | 92.9% | 69.6% | Run 12 local path (same weights) |
-| `lukasnorland/rhythm-skeleton-mt3` | 75.3% | 85.7% | 92.8% | **69.6%** | Run 8 (prior baseline; superseded by v1) |
-| `logs/2026-04-15/09-49-00/checkpoint-2001/lora` | 75.3% | 85.7% | 92.8% | 69.6% | Run 8 local path (same weights) |
-| `logs/2026-04-07/15-31-50/checkpoint-2001/lora` | 64.5% | 84.6% | 92.6% | 69.2% | Run 6, 603 train samples |
-| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | 91.3% | 67.9% | Run 5 local path (prior best timing) |
-| `logs/2026-04-09/14-48-24/checkpoint-4001/lora` | 55.4% | 84.5% | 92.5% | 69.2% | Run 7 — timing_offset=1 hurt timing |
-| `logs/2026-03-24/11-48-22/checkpoint-1001/lora` | 62.7% | 84.5% | 91.2% | 67.5% | Run 4 (resumed from Run 3) |
-| `logs/2026-03-23/17-09-07/checkpoint-500/lora` | 62.3% | 84.3% | 91.3% | 67.3% | Run 3 (first add_timing run) |
+> **Test-set note:** v1 (Run 12) and the runs before it were evaluated on a smaller 67-sample piano7 test split that included 10 corrupt audio/JSON pairs (removed 2026-05-12). v2 (Run 13 rev2) is evaluated on the cleaned 234-sample split. The two splits are **not directly comparable**; the apples-to-apples re-eval of v1 on the v2 split (row 2 below) is the correct baseline for comparing v1 ↔ v2.
+
+| Checkpoint | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Eval set | Notes |
+|------------|-----------|--------------|-----------|------------|---------|-------|
+| `lukasnorland/rhythm-skeleton-mt3-v2` | **69.2%** | **82.0%** | **91.7%** | **66.0%** | 234-sample cleaned | **Current baseline** — Run 13 rev2 (Run 12 resume on 2093-sample cleaned dataset) |
+| `lukasnorland/rhythm-skeleton-mt3-v1` (apples-to-apples) | 64.3% | 78.7% | 90.8% | 61.1% | 234-sample cleaned | v1 re-evaluated on v2's test set; **+4.92pp timing gap vs v2** |
+| `logs/2026-05-12/15-34-47/checkpoint-2001/lora` | 69.2% | 82.0% | 91.7% | 66.0% | 234-sample cleaned | Run 13 rev2 local path (same weights as v2) |
+| `lukasnorland/rhythm-skeleton-mt3-v1` (original) | 75.5% | 85.8% | 92.9% | 69.6% | 67-sample piano7 | Run 12 — historical number on easier pre-cleanup split; **not comparable to v2** |
+| `logs/2026-04-25/09-51-23/checkpoint-1001/lora` | 75.5% | 85.8% | 92.9% | 69.6% | 67-sample piano7 | Run 12 local path (same weights as v1) |
+| `lukasnorland/rhythm-skeleton-mt3` | 75.3% | 85.7% | 92.8% | 69.6% | 67-sample piano7 | Run 8 (superseded by v1, then v2) |
+| `logs/2026-04-15/09-49-00/checkpoint-2001/lora` | 75.3% | 85.7% | 92.8% | 69.6% | 67-sample piano7 | Run 8 local path (same weights) |
+| `logs/2026-04-07/15-31-50/checkpoint-2001/lora` | 64.5% | 84.6% | 92.6% | 69.2% | 67-sample piano7 | Run 6, 603 train samples |
+| `logs/2026-03-24/21-31-48/checkpoint-2001/lora` | 64.6% | 85.0% | 91.3% | 67.9% | 67-sample piano7 | Run 5 local path (prior best timing) |
+| `logs/2026-04-09/14-48-24/checkpoint-4001/lora` | 55.4% | 84.5% | 92.5% | 69.2% | 67-sample piano7 | Run 7 — timing_offset=1 hurt timing |
+| `logs/2026-03-24/11-48-22/checkpoint-1001/lora` | 62.7% | 84.5% | 91.2% | 67.5% | 67-sample piano7 | Run 4 (resumed from Run 3) |
+| `logs/2026-03-23/17-09-07/checkpoint-500/lora` | 62.3% | 84.3% | 91.3% | 67.3% | 67-sample piano7 | Run 3 (first add_timing run) |
 
 ---
 
@@ -208,6 +213,39 @@ Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when 
 ---
 
 ## Changelog
+
+### 2026-05-14 — Run 13 rev2 published as `rhythm-skeleton-mt3-v2` (data-ceiling broken; new baseline)
+
+Run 13 rev2 (Run 12 warm-resume on the cleaned 2327-sample SnapBeat dataset, 2000 steps at `base_lr=5e-5`) reached **69.21% timing accuracy** on the new 234-sample test set — vs **64.29%** for the v1 adapter on the same test set, i.e. **+4.92pp timing**, **+3.32pp fuzzy timing**, **+0.94pp other**, **+4.85pp column**, **−0.53 loss**. The data-ceiling hypothesis from Runs 9–12 (timing plateau at ~75.3% on the old split was caused by 602-sample dataset size, not hyperparameters) is now confirmed and broken. Shipped as the new production baseline.
+
+| | Before (v1) | After (v2) |
+|---|---|---|
+| **Production LoRA** | `lukasnorland/rhythm-skeleton-mt3-v1` (Run 12) | `lukasnorland/rhythm-skeleton-mt3-v2` (Run 13 rev2) |
+| **Train samples** | 602 (piano7-only subset) | 2093 (full cleaned dataset; 10 corrupt pairs removed) |
+| **Test samples** | 67 (piano7-only) | 234 (cleaned mixed origin) |
+| **Steps** | 1000 | 2000 |
+| **Source of truth** | `logs/2026-04-25/09-51-23/checkpoint-1001/lora` | `logs/2026-05-12/15-34-47/checkpoint-2001/lora` |
+| **Visibility** | private | private |
+
+What changed:
+
+- **Dataset cleanup (2026-05-12)**: removed 9 audio/JSON-mismatched stems (10 paired files — one stem had 2 UUID duplicates) from `datasets/dataset`. These were discovered during the original Run 13 cold-start, which had hot-zone failures on the affected samples. Cleanup recipe: map piano7-style stems to dataset UUIDs by `songMeta.songName`, delete matching `json/<uuid>.json` + `audio/<uuid>.*`.
+- **Dataset expansion**: trained on the full SnapBeat corpus (2327 samples post-cleanup, vs the 669-sample piano7-only subset used through Run 12). 90/10 split: 2093 train / 234 test.
+- **Warm-resume strategy preserved**: same `lora_resume_path` mechanism as Run 12 (loads adapter weights only, leaves optimizer/scheduler fresh). The first attempted Run 13 was a *cold* start at `base_lr=2e-4`; it was discarded after ~1500 steps because warm-resume from Run 12 was strictly faster.
+- **Patched `osuT5/test.py` for SnapBeat**: the stock `test.py` runs a `test_noise` pass that hard-requires the osu!-only `rhythm_complexities.csv` and reads `sample_weights` from each batch. SnapBeat batches don't carry that field. Patched with a `try/except` around the noise pass and a `.get(...)`-with-`None`-branch into `calc_loss` (which already handles `None`). Both fixes are minimal and backward-compatible with osu! configs.
+
+Follow-up tasks (status as of 2026-05-14):
+
+- [x] **Pushed v2 to HuggingFace** as `lukasnorland/rhythm-skeleton-mt3-v2` (private). Source of truth: `logs/2026-05-12/15-34-47/checkpoint-2001/lora`.
+- [x] **Flipped `_GAME_CODE_REGISTRY["MT3"]`** in [`snapbeat_inference.py`](../snapbeat_inference.py) → `rhythm-skeleton-mt3-v2`. Inference defaults now resolve to v2; the v1 repo is preserved unchanged for A/B comparisons.
+- [x] **Updated `Dockerfile.deploy`** — `LORA_REPO` build-arg default is `rhythm-skeleton-mt3-v2` and the canonical build tag is `snapbeat-lora:mt3-v2`.
+- [x] **Updated `docs/SNAPBEAT_DEPLOY_OPTION_A.md`** — all forward-looking refs point at v2; the v1↔v2 naming-scheme example in §4 still shows v1 → `v1` mapping intentionally as historical illustration.
+- [x] **Rebuilt the Docker image** as `snapbeat-lora:mt3-v2` (the prior `snapbeat-lora:dev` image stays around as a v1 A/B reference until you choose to retire it).
+- [ ] **Redeploy** — any running v1 deployments need a `docker pull` + restart against the new `snapbeat-lora:mt3-v2` image. (Out of scope for the model team; left to the deployment owner.)
+
+Methodological note for future runs:
+
+- **Eval-set boundary**: any future regression check must re-evaluate the reference model on the v2 234-sample test split. Cross-test-set absolute comparisons across the 2026-05-12 dataset boundary will silently mislead — Run 12 looked like it dropped 6pp under v2 conditions purely because the new split is harder; the actual on-the-same-set improvement is +4.92pp.
 
 ### 2026-04-26 — Run 12 published as `rhythm-skeleton-mt3-v1` (new baseline + naming-scheme shift)
 
