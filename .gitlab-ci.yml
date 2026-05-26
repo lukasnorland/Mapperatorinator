@@ -1,0 +1,61 @@
+include:
+  - project: "music/ci-templates"
+    ref: main
+    file:
+      - "/v2/pipelines/backend_argocd.yml"
+
+# ==================== BACKEND ====================
+
+buildkit_build:
+  extends: .buildkit_aws
+  environment:
+    name: $CI_COMMIT_BRANCH
+  variables:
+    DOCKERFILE_NAME: Dockerfile.deploy
+  script:
+    - |
+      BUILD_ARGS=""
+      for var in $(env | grep "^BUILD_ARG_" | cut -d= -f1); do
+        key=$(echo $var | sed 's/^BUILD_ARG_//')
+        value=$(eval echo \$$var)
+        BUILD_ARGS="$BUILD_ARGS --opt build-arg:${key}=${value}"
+      done
+
+      echo -n "$HF_TOKEN" > /tmp/hf_token
+
+      buildctl \
+        --addr tcp://buildkitd.gitlab.svc.cluster.local:1234 \
+        build \
+        --frontend dockerfile.v0 \
+        --local context=${CONTEXT_PATH:-.} \
+        --local dockerfile=${DOCKERFILE_PATH:-.} \
+        --opt filename=${DOCKERFILE_NAME:-Dockerfile} \
+        --secret id=hf_token,src=/tmp/hf_token \
+        --export-cache type=registry,ref=$CACHE_IMAGE,mode=max,compression=zstd,force-compression=true \
+        --import-cache type=registry,ref=$CACHE_IMAGE \
+        --opt build-arg:BUILDKIT_INLINE_CACHE=1 \
+        --opt build-arg:RELEASE_VERSION=${CI_COMMIT_SHORT_SHA} \
+        $BUILD_ARGS \
+        --output type=image,name=${DOCKER_REGISTRY}:${BUILD_TAG},push=true,compression=zstd,oci-mediatypes=true \
+        --progress=plain
+
+      rm -f /tmp/hf_token
+  rules:
+    - if: "$CI_COMMIT_BRANCH =~ /^(master|main|staging|develop)$/"
+
+security_scan:
+  extends: .security_scan_template
+  needs: [ "buildkit_build" ]
+  variables:
+    FULL_IMAGE_NAME: ${DOCKER_REGISTRY}/${CI_PROJECT_NAME}:${CI_COMMIT_BRANCH}-build-${CI_PIPELINE_ID}
+  rules:
+    - if: "$CI_COMMIT_BRANCH =~ /^(master|main|staging|develop)$/"
+
+deploy-argocd:
+  extends: .update_argocd_manifest
+  needs: [ "buildkit_build", "security_scan" ]
+  variables:
+    MANIFEST_FILEPATH: music-platform/${CI_COMMIT_BRANCH}/snapbeat-inference/deployment.yaml
+    CUSTOM_BUILD_TAG: ${CI_COMMIT_BRANCH}-build-${CI_PIPELINE_ID}
+  rules:
+    - if: "$CI_COMMIT_BRANCH =~ /^(master|staging|develop)$/"

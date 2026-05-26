@@ -24,6 +24,6 @@ if [[ -f ".env" ]]; then
 fi
 
 echo "[run_api] Starting Skeleton Design SSE API"
-echo "[run_api] POST http://127.0.0.1:5050/api/skeleton-design"
+echo "[run_api] POST http://127.0.0.1:8080/api/skeleton-design"
 exec python skeleton_design_api.py
 

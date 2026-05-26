@@ -110,7 +110,8 @@ The API uses these runtime environment variables:
 Run with GPU + published port:
 
 ```bash
-docker run --rm --gpus all -p 5050:5050 \
+docker run --rm --gpus all -p 8080:8080 \
+  -e PORT=8080 \
   -e REDIS_HOST=<redis-host> \
   -e REDIS_PORT=6379 \
   -e REDIS_DB=0 \
@@ -120,7 +121,7 @@ docker run --rm --gpus all -p 5050:5050 \
 
 API URL:
 
-- `http://127.0.0.1:5050/api/skeleton-design`
+- `http://127.0.0.1:8080/api/skeleton-design`
 
 ---
 
@@ -130,7 +131,7 @@ Request:
 
 ```bash
 curl -N -H 'Content-Type: application/json' \
-  -X POST 'http://127.0.0.1:5050/api/skeleton-design' \
+  -X POST 'http://127.0.0.1:8080/api/skeleton-design' \
   -d '{"audio_url":"https://.../song.mp3"}'
 ```
 
