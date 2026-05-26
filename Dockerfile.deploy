@@ -53,10 +53,20 @@ ARG BASE_MODEL=OliBomby/Mapperatorinator-v31
 ARG LORA_REPO=lukasnorland/rhythm-skeleton-mt3-v2
 RUN --mount=type=secret,id=hf_token,target=/run/secrets/hf_token,required=false \
     HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
-    python -c "import os; from huggingface_hub import snapshot_download; \
-tok = os.environ.get('HF_TOKEN') or None; \
-snapshot_download('${BASE_MODEL}', token=tok); \
-snapshot_download('${LORA_REPO}', token=tok)"
+    HUGGINGFACE_HUB_TOKEN="${HF_TOKEN}" \
+    python -c "\
+import os, sys; \
+from huggingface_hub import snapshot_download; \
+from huggingface_hub.errors import RepositoryNotFoundError; \
+tok = (os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_HUB_TOKEN') or '').strip() or None; \
+base, lora = '${BASE_MODEL}', '${LORA_REPO}'; \
+snapshot_download(base, token=tok); \
+try: \
+    snapshot_download(lora, token=tok); \
+except RepositoryNotFoundError as e: \
+    if not tok: \
+        print(f'ERROR: {lora} is private; set HF_TOKEN (fine-grained Read on that repo).', file=sys.stderr); \
+    raise e from None"
 
 # Non-root runtime user so bind-mounted /in and /out volumes do not end up
 # owned by root on the host. /data is the conventional mount point.

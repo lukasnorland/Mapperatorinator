@@ -14,6 +14,13 @@ buildkit_build:
     DOCKERFILE_NAME: Dockerfile.deploy
   script:
     - |
+      if [ -z "${HF_TOKEN:-}" ]; then
+        echo "ERROR: HF_TOKEN is not set in GitLab CI/CD variables."
+        echo "Required to download private LoRA lukasnorland/rhythm-skeleton-mt3-v2 during image build."
+        echo "Use a fine-grained Hugging Face token with Read access to that repo."
+        exit 1
+      fi
+
       BUILD_ARGS=""
       for var in $(env | grep "^BUILD_ARG_" | cut -d= -f1); do
         key=$(echo $var | sed 's/^BUILD_ARG_//')
