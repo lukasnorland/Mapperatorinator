@@ -1,15 +1,45 @@
-.venv
-__pycache__
-logs
+# Python bytecode / caches
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.envrc
+
+# Local env files / secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/
 logs_fid
 multirun
 tensorboard_logs
-tmp
-.idea
+
+# Common ML artifacts
+wandb/
+mlruns/
+lightning_logs/
+tensorboard/
+
+# Local scratch / API job artifacts
+tmp/
+*.lck
+
+# Project-specific
+datasets
 test
 test_inference.py
 test_inference_mai_mod.py
-*.lck
-.env
-.vscode
-datasets

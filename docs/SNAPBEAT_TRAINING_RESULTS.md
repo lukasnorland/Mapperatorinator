@@ -373,7 +373,7 @@ Eval results on the **same** new 234-sample test set:
 
 ### Ships as `lukasnorland/rhythm-skeleton-mt3-v2`
 
-Run 13 rev2 supersedes v1 as the production baseline. Per the versioned naming scheme established with v1, the v1 artifact is preserved unchanged for A/B comparisons. Update `_GAME_CODE_REGISTRY["MT3"]` in `snapbeat_inference.py` to resolve `MT3 → lukasnorland/rhythm-skeleton-mt3-v2`; see `docs/SNAPBEAT_FINETUNING.md`.
+Run 13 rev2 is published as `lukasnorland/rhythm-skeleton-mt3-v2` for A/B comparisons. This repo’s current default is v1 (see `_GAME_CODE_REGISTRY["MT3"]` in `snapbeat_inference.py`); pass `lora_path=lukasnorland/rhythm-skeleton-mt3-v2` explicitly if you want to run v2.
 
 ---
 

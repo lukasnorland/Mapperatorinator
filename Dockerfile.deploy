@@ -2,14 +2,14 @@
 #
 # Production Dockerfile for SnapBeat inference (API — Skeleton Design SSE).
 # Builds a self-contained image with Mapperatorinator v31 base + the fine-tuned
-# rhythm-skeleton-mt3-v2 LoRA baked in, so the backend server does not need
+# rhythm-skeleton-mt3-v1 LoRA baked in, so the backend server does not need
 # network access to HuggingFace at runtime.
 #
 # Build:
-#   export HF_TOKEN=hf_...   # read scope on lukasnorland/rhythm-skeleton-mt3-v2
+#   export HF_TOKEN=hf_...   # read scope on lukasnorland/rhythm-skeleton-mt3-v1
 #   DOCKER_BUILDKIT=1 docker build -f Dockerfile.deploy \
 #     --secret id=hf_token,env=HF_TOKEN \
-#     -t snapbeat-lora:mt3-v2 .
+#     -t snapbeat-lora:mt3-v1 .
 #
 # Run:
 #   docker run --rm --gpus all --network host \
@@ -50,11 +50,12 @@ RUN mkdir -p /app/tmp /app/logs
 # secret (tmpfs); it never appears in a layer or `docker history`. required=false
 # lets this Dockerfile still build against public repos without a token.
 ARG BASE_MODEL=OliBomby/Mapperatorinator-v31
-ARG LORA_REPO=lukasnorland/rhythm-skeleton-mt3-v2
+ARG LORA_REPO=lukasnorland/rhythm-skeleton-mt3-v1
 RUN --mount=type=secret,id=hf_token,target=/run/secrets/hf_token,required=false \
     HF_TOKEN="$(cat /run/secrets/hf_token 2>/dev/null || true)" \
+    HUGGINGFACE_HUB_TOKEN="${HF_TOKEN}" \
     python -c "import os; from huggingface_hub import snapshot_download; \
-tok = os.environ.get('HF_TOKEN') or None; \
+tok = (os.environ.get('HF_TOKEN') or os.environ.get('HUGGINGFACE_HUB_TOKEN') or '').strip() or None; \
 snapshot_download('${BASE_MODEL}', token=tok); \
 snapshot_download('${LORA_REPO}', token=tok)"
 

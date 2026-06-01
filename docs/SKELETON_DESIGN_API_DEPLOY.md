@@ -17,7 +17,7 @@ The service caches results in Redis using an audio-content hash.
 | Item | Source | Notes |
 |---|---|---|
 | Source code + `Dockerfile.deploy` | Repo `lukasnorland/Mapperatorinator`, branch `amaremix` | Pin to a commit SHA for reproducible builds (see §3). |
-| HuggingFace token (`HF_TOKEN`) | Shared privately | Fine-grained, scoped to **Read** on `lukasnorland/rhythm-skeleton-mt3`. Required at **build** time to bake weights into the image. |
+| HuggingFace token (`HF_TOKEN`) | Shared privately | Fine-grained, scoped to **Read** on `lukasnorland/rhythm-skeleton-mt3-v1`. Required at **build** time to bake weights into the image. |
 | Redis connection info | Provided by infra | Used at runtime for result/status caching. |
 
 ---
@@ -72,13 +72,13 @@ Build using BuildKit secret so `HF_TOKEN` never lands in an image layer:
 DOCKER_BUILDKIT=1 docker build \
   -f Dockerfile.deploy \
   --secret id=hf_token,env=HF_TOKEN \
-  -t snapbeat-api:mt3-1 .
+  -t snapbeat-api:mt3-v1 .
 ```
 
 The Dockerfile downloads (bakes) both:
 
 - `BASE_MODEL` (default: `OliBomby/Mapperatorinator-v31`)
-- `LORA_REPO` (default: `lukasnorland/rhythm-skeleton-mt3`)
+- `LORA_REPO` (default: `lukasnorland/rhythm-skeleton-mt3-v1`)
 
 Optional override:
 
@@ -86,8 +86,8 @@ Optional override:
 DOCKER_BUILDKIT=1 docker build -f Dockerfile.deploy \
   --secret id=hf_token,env=HF_TOKEN \
   --build-arg BASE_MODEL=OliBomby/Mapperatorinator-v31 \
-  --build-arg LORA_REPO=lukasnorland/rhythm-skeleton-mt3 \
-  -t snapbeat-api:mt3-1 .
+  --build-arg LORA_REPO=lukasnorland/rhythm-skeleton-mt3-v1 \
+  -t snapbeat-api:mt3-v1 .
 ```
 
 ---
@@ -110,17 +110,18 @@ The API uses these runtime environment variables:
 Run with GPU + published port:
 
 ```bash
-docker run --rm --gpus all -p 5050:5050 \
+docker run --rm --gpus all -p 8080:8080 \
+  -e PORT=8080 \
   -e REDIS_HOST=<redis-host> \
   -e REDIS_PORT=6379 \
   -e REDIS_DB=0 \
   -e REDIS_TTL_SECONDS=86400 \
-  snapbeat-api:mt3-1
+  snapbeat-api:mt3-v1
 ```
 
 API URL:
 
-- `http://127.0.0.1:5050/api/skeleton-design`
+- `http://127.0.0.1:8080/api/skeleton-design`
 
 ---
 
@@ -130,7 +131,7 @@ Request:
 
 ```bash
 curl -N -H 'Content-Type: application/json' \
-  -X POST 'http://127.0.0.1:5050/api/skeleton-design' \
+  -X POST 'http://127.0.0.1:8080/api/skeleton-design' \
   -d '{"audio_url":"https://.../song.mp3"}'
 ```
 
