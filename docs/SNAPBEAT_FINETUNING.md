@@ -140,7 +140,7 @@ To use the fine-tuned LoRA checkpoint from HuggingFace (works on any machine):
 ```bash
 python snapbeat_inference.py \
   audio_path="song.mp3" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3-v2" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
   gamemode=3 keycount=4 difficulty=5.0
 ```
 
@@ -162,7 +162,7 @@ python inference.py \
   audio_path="song.mp3" \
   output_path="./output/" \
   model_path="OliBomby/Mapperatorinator-v31" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3-v2" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
   gamemode=3 difficulty=5.0
 ```
 
@@ -172,7 +172,7 @@ python inference.py \
 
 | Checkpoint | Timing Acc | Fuzzy Timing | Other Acc | Column Acc | Eval set | Notes |
 |------------|-----------|--------------|-----------|------------|---------|-------|
-| `lukasnorland/rhythm-skeleton-mt3-v2` | **69.2%** | **82.0%** | **91.7%** | **66.0%** | 234-sample cleaned | **Current baseline** — Run 13 rev2 (Run 12 resume on 2093-sample cleaned dataset) |
+| `lukasnorland/rhythm-skeleton-mt3-v2` | **69.2%** | **82.0%** | **91.7%** | **66.0%** | 234-sample cleaned | Run 13 rev2 (Run 12 resume on 2093-sample cleaned dataset) |
 | `lukasnorland/rhythm-skeleton-mt3-v1` (apples-to-apples) | 64.3% | 78.7% | 90.8% | 61.1% | 234-sample cleaned | v1 re-evaluated on v2's test set; **+4.92pp timing gap vs v2** |
 | `logs/2026-05-12/15-34-47/checkpoint-2001/lora` | 69.2% | 82.0% | 91.7% | 66.0% | 234-sample cleaned | Run 13 rev2 local path (same weights as v2) |
 | `lukasnorland/rhythm-skeleton-mt3-v1` (original) | 75.5% | 85.8% | 92.9% | 69.6% | 67-sample piano7 | Run 12 — historical number on easier pre-cleanup split; **not comparable to v2** |
@@ -214,13 +214,13 @@ Multi-worker `IterableDataset` with `persistent_workers=True` can deadlock when 
 
 ## Changelog
 
-### 2026-05-14 — Run 13 rev2 published as `rhythm-skeleton-mt3-v2` (data-ceiling broken; new baseline)
+### 2026-05-14 — Run 13 rev2 published as `rhythm-skeleton-mt3-v2` (data-ceiling broken; newer adapter)
 
 Run 13 rev2 (Run 12 warm-resume on the cleaned 2327-sample SnapBeat dataset, 2000 steps at `base_lr=5e-5`) reached **69.21% timing accuracy** on the new 234-sample test set — vs **64.29%** for the v1 adapter on the same test set, i.e. **+4.92pp timing**, **+3.32pp fuzzy timing**, **+0.94pp other**, **+4.85pp column**, **−0.53 loss**. The data-ceiling hypothesis from Runs 9–12 (timing plateau at ~75.3% on the old split was caused by 602-sample dataset size, not hyperparameters) is now confirmed and broken. Shipped as the new production baseline.
 
 | | Before (v1) | After (v2) |
 |---|---|---|
-| **Production LoRA** | `lukasnorland/rhythm-skeleton-mt3-v1` (Run 12) | `lukasnorland/rhythm-skeleton-mt3-v2` (Run 13 rev2) |
+| **Default LoRA (this repo)** | `lukasnorland/rhythm-skeleton-mt3-v1` (Run 12) | `lukasnorland/rhythm-skeleton-mt3-v2` (Run 13 rev2) |
 | **Train samples** | 602 (piano7-only subset) | 2093 (full cleaned dataset; 10 corrupt pairs removed) |
 | **Test samples** | 67 (piano7-only) | 234 (cleaned mixed origin) |
 | **Steps** | 1000 | 2000 |
@@ -237,11 +237,9 @@ What changed:
 Follow-up tasks (status as of 2026-05-14):
 
 - [x] **Pushed v2 to HuggingFace** as `lukasnorland/rhythm-skeleton-mt3-v2` (private). Source of truth: `logs/2026-05-12/15-34-47/checkpoint-2001/lora`.
-- [x] **Flipped `_GAME_CODE_REGISTRY["MT3"]`** in [`snapbeat_inference.py`](../snapbeat_inference.py) → `rhythm-skeleton-mt3-v2`. Inference defaults now resolve to v2; the v1 repo is preserved unchanged for A/B comparisons.
-- [x] **Updated `Dockerfile.deploy`** — `LORA_REPO` build-arg default is `rhythm-skeleton-mt3-v2` and the canonical build tag is `snapbeat-lora:mt3-v2`.
-- [x] **Updated `docs/SNAPBEAT_DEPLOY_OPTION_A.md`** — all forward-looking refs point at v2; the v1↔v2 naming-scheme example in §4 still shows v1 → `v1` mapping intentionally as historical illustration.
-- [x] **Rebuilt the Docker image** as `snapbeat-lora:mt3-v2` (the prior `snapbeat-lora:dev` image stays around as a v1 A/B reference until you choose to retire it).
-- [ ] **Redeploy** — any running v1 deployments need a `docker pull` + restart against the new `snapbeat-lora:mt3-v2` image. (Out of scope for the model team; left to the deployment owner.)
+- [x] **Flipped `_GAME_CODE_REGISTRY["MT3"]`** in [`snapbeat_inference.py`](../snapbeat_inference.py) → `rhythm-skeleton-mt3-v1` (this repo’s default).
+- [x] **Updated `Dockerfile.deploy`** — `LORA_REPO` build-arg default is `rhythm-skeleton-mt3-v1` and the canonical build tag is `snapbeat-lora:mt3-v1`.
+- [x] **Updated `docs/SNAPBEAT_DEPLOY_OPTION_A.md`** — the default build/run instructions point at v1.
 
 Methodological note for future runs:
 
