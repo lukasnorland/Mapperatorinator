@@ -373,7 +373,7 @@ Eval results on the **same** new 234-sample test set:
 
 ### Ships as `lukasnorland/rhythm-skeleton-mt3-v2`
 
-Run 13 rev2 is published as `lukasnorland/rhythm-skeleton-mt3-v2` for A/B comparisons. This repo’s current default is v1 (see `_GAME_CODE_REGISTRY["MT3"]` in `snapbeat_inference.py`); pass `lora_path=lukasnorland/rhythm-skeleton-mt3-v2` explicitly if you want to run v2.
+Run 13 rev2 is published as `lukasnorland/rhythm-skeleton-mt3-v2` and is the repo's default MT3 LoRA (see `_GAME_CODE_REGISTRY["MT3"]` in `snapbeat_inference.py`, made the default 2026-06-11); pass `lora_path=lukasnorland/rhythm-skeleton-mt3-v1` explicitly if you need to A/B against v1.
 
 ---
 
