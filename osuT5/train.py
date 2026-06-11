@@ -69,6 +69,14 @@ def main(args: TrainConfig):
         attn_implementation=args.attn_implementation,
         eval_mode=False
     )
+    loss_fn = getattr(model, "loss_fn", None)
+    if loss_fn is not None:
+        print(
+            f"Effective loss config: label_smoothing={loss_fn.label_smoothing}, "
+            f"class weight values={sorted(loss_fn.weight.unique().tolist())} "
+            f"(expected rhythm_weight={args.data.rhythm_weight}, column_weight={args.data.column_weight})"
+        )
+
     train_dataloader, test_dataloader = get_dataloaders(tokenizer, args, shared)
 
     if args.enable_lora:

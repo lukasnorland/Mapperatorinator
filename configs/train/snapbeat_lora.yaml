@@ -60,7 +60,8 @@ data:
   add_empty_sequences: true
   types_first: true
   rhythm_weight: 5.0            # Run 11: keep at 5.0 (Runs 9/10 showed near-optimal)
-  label_smoothing: 0.05         # Run 11: revert 0.1 → 0.05 — Run 10 (0.1/0.1) under-performed Run 8 (0.05/0.05) by 0.77pp
+  column_weight: 2.0            # Run 14: up-weight MANIA_COLUMN tokens — column_acc is the weakest v2 metric (65.99%). Keep modest (Run 9: rhythm_weight 5→8 hurt). Makes eval loss non-comparable to v2's 1.9806.
+  label_smoothing: 0.0          # Was a silent no-op in Runs 1-13: model config hardcoded 0.0 until 2026-06-11 fix. All shipped adapters (v1, v2) effectively trained with 0.0 — keep 0.0 to preserve the proven recipe; real smoothing is now an untested lever to sweep deliberately.
   dt_augment_prob: 0.0          # disable DT augment — SnapBeat has fixed BPM, this just adds noise
   dt_augment_range: [1.1, 1.4]
   timing_random_offset: 0              # jitter hurts exact timing (Run 7: -9pp) — keep off

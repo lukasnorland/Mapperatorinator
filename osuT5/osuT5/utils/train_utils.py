@@ -203,6 +203,9 @@ def eval_model(
     time_range = range(tokenizer.event_start[EventType.TIME_SHIFT], tokenizer.event_end[EventType.TIME_SHIFT])
     class_weights = torch.ones(tokenizer.vocab_size_out)
     class_weights[time_range] = args.data.rhythm_weight
+    if EventType.MANIA_COLUMN in tokenizer.event_start:
+        column_range = range(tokenizer.event_start[EventType.MANIA_COLUMN], tokenizer.event_end[EventType.MANIA_COLUMN])
+        class_weights[column_range] = args.data.column_weight
     loss_fn = nn.CrossEntropyLoss(weight=class_weights, reduction="none", ignore_index=LABEL_IGNORE_ID)
     loss_fn = loss_fn.to(accelerator.device)
 

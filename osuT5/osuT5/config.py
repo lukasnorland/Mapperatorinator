@@ -115,6 +115,7 @@ class DataConfig:
     max_difficulty: float = 100  # Maximum difficulty to consider including in the dataset
     sample_weights_path: str = ''  # Path to sample weights
     rhythm_weight: float = 3.0  # Weight of rhythm tokens in the loss calculation
+    column_weight: float = 1.0  # Weight of mania column tokens in the loss calculation
     label_smoothing: float = 0.0  # Label smoothing for the loss calculation
     lookback: float = 0  # Fraction of audio sequence to fill with tokens from previous inference window
     lookahead: float = 0  # Fraction of audio sequence to skip at the end of the audio window

@@ -129,6 +129,7 @@ class Mapperatorinator(PreTrainedModel, GenerationMixin):
 
         class_weights = torch.ones(config.vocab_size)
         class_weights[config.rhythm_token_start:config.rhythm_token_end] = config.rhythm_weight
+        class_weights[config.column_token_start:config.column_token_end] = config.column_weight
         self.loss_fn = nn.CrossEntropyLoss(
             weight=class_weights,
             reduction="none",
