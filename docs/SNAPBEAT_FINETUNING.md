@@ -140,7 +140,7 @@ To use the fine-tuned LoRA checkpoint from HuggingFace (works on any machine):
 ```bash
 python snapbeat_inference.py \
   audio_path="song.mp3" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v2" \
   gamemode=3 keycount=4 difficulty=5.0
 ```
 
@@ -162,7 +162,7 @@ python inference.py \
   audio_path="song.mp3" \
   output_path="./output/" \
   model_path="OliBomby/Mapperatorinator-v31" \
-  lora_path="lukasnorland/rhythm-skeleton-mt3-v1" \
+  lora_path="lukasnorland/rhythm-skeleton-mt3-v2" \
   gamemode=3 difficulty=5.0
 ```
 
@@ -237,9 +237,9 @@ What changed:
 Follow-up tasks (status as of 2026-05-14):
 
 - [x] **Pushed v2 to HuggingFace** as `lukasnorland/rhythm-skeleton-mt3-v2` (private). Source of truth: `logs/2026-05-12/15-34-47/checkpoint-2001/lora`.
-- [x] **Flipped `_GAME_CODE_REGISTRY["MT3"]`** in [`snapbeat_inference.py`](../snapbeat_inference.py) → `rhythm-skeleton-mt3-v1` (this repo’s default).
-- [x] **Updated `Dockerfile.deploy`** — `LORA_REPO` build-arg default is `rhythm-skeleton-mt3-v1` and the canonical build tag is `snapbeat-lora:mt3-v1`.
-- [x] **Updated `docs/SNAPBEAT_DEPLOY_OPTION_A.md`** — the default build/run instructions point at v1.
+- [x] **Flipped `_GAME_CODE_REGISTRY["MT3"]`** in [`snapbeat_inference.py`](../snapbeat_inference.py) → `rhythm-skeleton-mt3-v2` (this repo’s default).
+- [x] **Updated `Dockerfile.deploy`** — `LORA_REPO` build-arg default is `rhythm-skeleton-mt3-v2` and the canonical build tag is `snapbeat-lora:mt3-v2`.
+- [x] **Updated `docs/SNAPBEAT_DEPLOY_OPTION_A.md`** — the default build/run instructions point at v2.
 
 Methodological note for future runs:
 
