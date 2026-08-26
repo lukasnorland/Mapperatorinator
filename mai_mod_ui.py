@@ -1,13 +1,16 @@
-import excepthook  # noqa
+import utils.excepthook  # noqa
 import functools
+import hmac
 import os
 import platform
+import secrets
 import socket
 import subprocess
 import sys
 import threading
 import time
 import datetime
+import traceback
 from typing import Callable, Any, Tuple, Dict
 
 import webview
@@ -50,6 +53,46 @@ werkzeug.serving._ansi_style = _ansi_style_supressor(werkzeug.serving._ansi_styl
 
 app = Flask(__name__, template_folder=template_folder, static_folder=static_folder)
 app.secret_key = os.urandom(24)  # Set a secret key for Flask
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',
+)
+
+CSRF_HEADER_NAME = 'X-Mapperatorinator-CSRF-Token'
+LOCAL_UI_CSRF_TOKEN = secrets.token_urlsafe(32)
+CSRF_PROTECTED_ENDPOINTS = {
+    'start_inference',
+    'cancel_inference',
+    'save_config',
+    'validate_paths',
+    'open_folder',
+    'open_log_file',
+}
+
+
+def _is_authorized_ui_request() -> bool:
+    token = request.headers.get(CSRF_HEADER_NAME, '')
+    return bool(token) and hmac.compare_digest(token, LOCAL_UI_CSRF_TOKEN)
+
+
+@app.before_request
+def _protect_local_ui_endpoints():
+    if request.endpoint not in CSRF_PROTECTED_ENDPOINTS:
+        return None
+
+    if request.method != 'POST':
+        return jsonify({
+            "status": "error",
+            "message": "This endpoint only accepts authenticated POST requests."
+        }), 405
+
+    if not _is_authorized_ui_request():
+        return jsonify({
+            "status": "error",
+            "message": "Missing or invalid CSRF token. Refresh the UI and try again."
+        }), 403
+
+    return None
 
 
 # --- pywebview API Class ---
@@ -147,7 +190,7 @@ def format_list_arg(items):
 def index():
     """Renders the main HTML page."""
     # Jinja rendering is now handled by Flask's render_template
-    return render_template('index_mai_mod.html')
+    return render_template('index_mai_mod.html', csrf_token=LOCAL_UI_CSRF_TOKEN, csrf_header_name=CSRF_HEADER_NAME)
 
 
 @app.route('/start_inference', methods=['POST'])
@@ -349,10 +392,10 @@ def cancel_inference():
         return jsonify({"status": "error", "message": message}), status_code
 
 
-@app.route('/open_folder', methods=['GET'])
+@app.route('/open_folder', methods=['POST'])
 def open_folder():
     """Opens a folder in the file explorer."""
-    folder_path = request.args.get('folder')
+    folder_path = request.form.get('folder')
     print(f"Request received to open folder: {folder_path}")
     if not folder_path:
         return jsonify({"status": "error", "message": "No folder path specified"}), 400
@@ -387,10 +430,10 @@ def open_folder():
         return jsonify({"status": "error", "message": f"Could not open folder: {e}"}), 500
 
 
-@app.route('/open_log_file', methods=['GET'])
+@app.route('/open_log_file', methods=['POST'])
 def open_log_file():
     """Opens a specific log file."""
-    log_path = request.args.get('path')
+    log_path = request.form.get('path')
     print(f"Request received to open log file: {log_path}")
     if not log_path:
         return jsonify({"status": "error", "message": "No log file path specified"}), 400
@@ -519,6 +562,39 @@ def find_available_port(start_port=5000, max_tries=100):
     raise IOError("Could not find an available port.")
 
 
+def launch_browser_fallback(flask_url, flask_thread):
+    """Keep the server alive when an embedded window cannot be created."""
+    print(f"Running without an embedded window. Open {flask_url} in your browser.")
+    print("Press Ctrl+C to stop the server.")
+
+    try:
+        while flask_thread.is_alive():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping server...")
+
+
+def launch_webview_window(window_title, flask_url, window_width, window_height, api):
+    """Create the embedded pywebview window when a GUI backend is available."""
+    print(f"Creating pywebview window loading URL: {flask_url}")
+    try:
+        webview.create_window(
+            window_title,
+            url=flask_url,
+            width=window_width,
+            height=window_height,
+            resizable=True,
+            js_api=api,
+        )
+        webview.start(debug=False)
+        print("Pywebview window closed. Exiting application.")
+        return True
+    except Exception as e:
+        print(f"pywebview could not start an embedded window: {e}")
+        print(traceback.format_exc())
+        return False
+
+
 # --- Main Execution ---
 if __name__ == '__main__':
     # Find an available port for Flask
@@ -551,23 +627,8 @@ if __name__ == '__main__':
     window_title = 'MaiMod'
     flask_url = f'http://127.0.0.1:{flask_port}/'
 
-    print(f"Creating pywebview window loading URL: {flask_url}")
-
     # Instantiate the API class (doesn't need window object anymore)
     api = Api()
 
-    # Pass api instance directly to create_window via js_api
-    window = webview.create_window(
-        window_title,
-        url=flask_url,
-        width=window_width,  # Use calculated width
-        height=window_height,  # Use calculated height
-        resizable=True,
-        js_api=api  # Expose Python API class here
-    )
-
-    # Start the pywebview event loop (no args needed here now)
-    webview.start(debug=False)
-
-    print("Pywebview window closed. Exiting application.")
-    # Flask thread will exit automatically as it's a daemon
+    if not launch_webview_window(window_title, flask_url, window_width, window_height, api):
+        launch_browser_fallback(flask_url, flask_thread)

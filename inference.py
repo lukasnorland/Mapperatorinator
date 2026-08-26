@@ -1,7 +1,8 @@
 import logging
+import multiprocessing
 import sys
 
-import excepthook  # noqa
+import utils.excepthook  # noqa
 import os.path
 import uuid
 from functools import reduce
@@ -18,7 +19,7 @@ from importlib import metadata
 from packaging.version import Version
 
 import osu_diffusion
-import routed_pickle
+from utils import routed_pickle
 from config import InferenceConfig
 from diffusion_pipeline import DiffisionPipeline
 from osuT5.osuT5.config import TrainConfig
@@ -29,7 +30,7 @@ from osuT5.osuT5.inference.server import InferenceClient
 from osuT5.osuT5.inference.super_timing_generator import SuperTimingGenerator
 from osuT5.osuT5.model import Mapperatorinator
 from osuT5.osuT5.tokenizer import ContextType
-from osuT5.osuT5.utils import load_model_loaders
+from osuT5.osuT5.utils import load_model_loaders, resolve_compatible_lora_path, resolve_model_checkpoint_path, get_model_checkpoint_subfolder
 from osu_diffusion import DiT_models
 from osu_diffusion.config import DiffusionTrainConfig
 
@@ -67,9 +68,22 @@ def assert_package_versions():
 
 def setup_inference_environment(seed: int):
     assert_package_versions()
+    multiprocessing.set_start_method('spawn', force=True)
     torch.set_grad_enabled(False)
     torch.set_float32_matmul_precision('high')
     set_seed(seed)
+
+
+def _cuda_native_bf16() -> bool:
+    """Whether the current CUDA device supports bf16 natively (not emulated).
+
+    Works on both NVIDIA (compute capability >= 8.0) and ROCm builds, unlike a
+    raw compute-capability check whose numbering is NVIDIA-specific.
+    """
+    try:
+        return torch.cuda.is_bf16_supported(including_emulation=False)
+    except TypeError:  # torch < 2.3 has no emulation flag (and no emulation)
+        return torch.cuda.is_bf16_supported()
 
 
 def compile_device_and_seed(args: InferenceConfig, verbose=True):
@@ -99,6 +113,30 @@ def compile_device_and_seed(args: InferenceConfig, verbose=True):
 
     if verbose and message is not None:
         print(message)
+
+    # Resolve precision against the device. bf16 is the default, but low
+    # precision only helps on CUDA, and native bf16 needs hardware support
+    # (Ampere or newer on NVIDIA); emulated bf16 on older GPUs is slower than
+    # fp32. Fall back to fp32 there rather than risk fp16 numerics.
+    message = None
+    if args.precision in ("bf16", "fp16") and args.device != "cuda":
+        message = f"{args.precision} precision requires CUDA; using fp32 on '{args.device}'."
+        args.precision = "fp32"
+    elif args.precision == "bf16" and args.device == "cuda" and not _cuda_native_bf16():
+        message = ("GPU does not natively support bf16; falling back to fp32. "
+                   "Set precision=fp16 manually if your GPU has fast fp16.")
+        args.precision = "fp32"
+
+    if verbose and message is not None:
+        print(message)
+
+    # The fast decoder loop uses CUDA graphs, which need a CUDA device. On CUDA
+    # devices where graph capture fails at runtime (e.g. some ROCm setups) it
+    # falls back to the stock generate loop on its own.
+    if args.fast_decoder_loop and args.device != "cuda":
+        if verbose:
+            print(f"fast_decoder_loop requires CUDA; disabling on '{args.device}'.")
+        args.fast_decoder_loop = False
 
     message = None
     if args.attn_implementation == "auto":
@@ -142,7 +180,7 @@ def compile_paths(args: InferenceConfig):
             beatmap = Beatmap.from_path(beatmap_path)
 
             # Autofill audio path if empty
-            if not audio_path:
+            if not audio_path and beatmap.audio_filename:
                 audio_path = beatmap_path.parent / beatmap.audio_filename
 
             # Autofill output path if empty
@@ -211,7 +249,7 @@ def compile_args_from_beatmap(args: InferenceConfig, verbose=True):
         "creator": beatmap_config.creator,
         "version": beatmap_config.version,
         "source": beatmap_config.source,
-        "background": str(beatmap_path.parent / beatmap.background),
+        "background": str(beatmap_path.parent / beatmap.background) if beatmap.background else None,
         "preview_time": beatmap_config.preview_time,
     }
 
@@ -372,6 +410,40 @@ def get_config(args: InferenceConfig):
     )
 
 
+def supports_explicit_timing_output(args: InferenceConfig) -> bool:
+    return any(ContextType.TIMING in context_type["out"] for context_type in args.train.data.context_types)
+
+
+def should_generate_timing_context(args: InferenceConfig, output_type: list[ContextType]) -> bool:
+    has_empty_or_none_context = len(args.in_context) == 0 or ContextType.NONE in args.in_context
+    return has_empty_or_none_context and supports_explicit_timing_output(args) and any(
+        context_type in output_type for context_type in [ContextType.TIMING, ContextType.MAP]
+    )
+
+
+def should_load_separate_timing_model(args: InferenceConfig, output_type: list[ContextType] | None = None) -> bool:
+    output_type = args.output_type if output_type is None else output_type
+    needs_generated_timing = (
+        args.super_timing and (len(args.in_context) == 0 or ContextType.NONE in args.in_context)
+    ) or should_generate_timing_context(args, output_type)
+
+    if not needs_generated_timing:
+        return False
+
+    current_ckpt_path, current_subfolder = resolve_model_checkpoint_path(
+        args.model_path,
+        gamemode=args.gamemode,
+        auto_select_gamemode_model=args.auto_select_gamemode_model,
+    )
+    base_ckpt_path, base_subfolder = resolve_model_checkpoint_path(
+        args.model_path,
+        gamemode=args.gamemode,
+        auto_select_gamemode_model=False,
+    )
+
+    return current_ckpt_path != base_ckpt_path or current_subfolder != base_subfolder
+
+
 def generate(
         args: InferenceConfig,
         *,
@@ -382,6 +454,8 @@ def generate(
         beatmap_config: BeatmapConfig,
         model: Mapperatorinator | InferenceClient,
         tokenizer,
+        timing_model: Mapperatorinator | InferenceClient | None = None,
+        timing_tokenizer=None,
         diff_model=None,
         diff_tokenizer=None,
         refine_model=None,
@@ -403,6 +477,8 @@ def generate(
         # Validate beatmap file type
         if beatmap_path_obj.suffix.lower() != '.osu':
             raise ValueError(f"Beatmap file must have .osu extension: {beatmap_path}")
+    if (output_path is None or output_path == "") and (not args.add_to_beatmap or not args.overwrite_reference_beatmap or args.export_osz):
+        raise ValueError("Output path is required.")
 
     preprocessor = Preprocessor(args, parallel=args.parallel)
     processor = Processor(args, model, tokenizer)
@@ -412,25 +488,27 @@ def generate(
     sequences = preprocessor.segment(audio)
     extra_in_context = {}
     output_type = args.output_type.copy()
+    timing_model = model if timing_model is None else timing_model
+    timing_tokenizer = tokenizer if timing_tokenizer is None else timing_tokenizer
 
     # Auto generate timing if not provided in in_context and required for the model and this output_type
     timing_events, timing_times, timing = None, None, None
-    if args.super_timing and ContextType.NONE in args.in_context:
-        super_timing_generator = SuperTimingGenerator(args, model, tokenizer)
+    if args.super_timing and (len(args.in_context) == 0 or ContextType.NONE in args.in_context):
+        super_timing_generator = SuperTimingGenerator(args, timing_model, timing_tokenizer)
         timing_events, timing_times = super_timing_generator.generate(audio, generation_config, verbose=verbose)
         timing = postprocessor.generate_timing(timing_events)
         extra_in_context[ContextType.TIMING] = timing
         if ContextType.TIMING in output_type:
             output_type.remove(ContextType.TIMING)
-    elif (ContextType.NONE in args.in_context and ContextType.MAP in output_type and
-          not any((ContextType.NONE in ctx["in"] or len(ctx["in"]) == 0) and ContextType.MAP in ctx["out"] for ctx in
-                  args.train.data.context_types)):
-        # Generate timing and convert in_context to timing context
-        timing_events, timing_times = processor.generate(
+    elif should_generate_timing_context(args, output_type):
+        # Generate timing context with the base model and reuse it for the main generation pass.
+        timing_processor = Processor(args, timing_model, timing_tokenizer)
+        timing_events, timing_times = timing_processor.generate(
             sequences=sequences,
             generation_config=generation_config,
             in_context=[ContextType.NONE],
             out_context=[ContextType.TIMING],
+            beatmap_path=beatmap_path,
             verbose=verbose,
         )[0]
         timing_events, timing_times = events_of_type(timing_events, timing_times, TIMING_TYPES)
@@ -487,40 +565,34 @@ def generate(
         if verbose:
             logger.info(f"Merged generated content with reference beatmap")
 
-    result_path = None
-    osz_path = None
+    if args.add_to_beatmap and args.overwrite_reference_beatmap:
+        output_osu_path = Path(beatmap_path)
+    else:
+        # noinspection PyTypeChecker
+        output_osu_path = Path(output_path) / f"beatmap{str(uuid.uuid4().hex)}.osu"
 
-    if output_path is not None and output_path != "":
-        if args.add_to_beatmap and args.overwrite_reference_beatmap:
-            result_path = beatmap_path
-        else:
-            result_path = os.path.join(output_path, f"beatmap{str(uuid.uuid4().hex)}.osu")
-        postprocessor.write_result(result, result_path)
+    if args.export_osz:
+        # noinspection PyTypeChecker
+        result_path = Path(output_path) / f"beatmap{str(uuid.uuid4().hex)}.osz"
+        postprocessor.export_osz(result_path, result, output_osu_path.name, audio_path, args.background)
+        if verbose:
+            logger.info(f"Generated .osz saved to {result_path}")
+    else:
+        result_path = output_osu_path
+        postprocessor.write_result(result_path, result)
         if verbose:
             logger.info(f"Generated beatmap saved to {result_path}")
 
-    if args.export_osz:
-        osz_path = os.path.join(output_path, f"beatmap{str(uuid.uuid4().hex)}.osz")
-        postprocessor.export_osz(result_path, audio_path, osz_path, args.background)
-        if verbose:
-            logger.info(f"Generated .osz saved to {osz_path}")
 
-    return result, result_path, osz_path
+    return result, result_path
 
 
-def load_model_with_server(
-        ckpt_path_str: str,
-        t5_args: TrainConfig,
-        device,
-        max_batch_size: int = 8,
-        use_server: bool = False,
-        precision: str = "fp32",
-        attn_implementation: str = "sdpa",
-        eval_mode: bool = True,
-        lora_path=None,
-):
+def load_model_with_server(ckpt_path: str | Path | None, t5_args: TrainConfig, device, max_batch_size: int = 8,
+                           use_server: bool = False, precision: str = "fp32", attn_implementation: str = "sdpa",
+                           eval_mode: bool = True, lora_path=None, gamemode: int | None = None,
+                           auto_select_gamemode_model: bool = True, fast_decoder_loop: bool = False):
     model_loader, tokenizer_loader = load_model_loaders(
-        ckpt_path_str=ckpt_path_str,
+        ckpt_path=ckpt_path,
         t5_args=t5_args,
         device=device,
         precision=precision,
@@ -528,19 +600,50 @@ def load_model_with_server(
         eval_mode=eval_mode,
         pickle_module=routed_pickle,
         lora_path=lora_path,
+        gamemode=gamemode,
+        auto_select_gamemode_model=auto_select_gamemode_model,
     )
+
     return InferenceClient(
         model_loader,
         tokenizer_loader,
         max_batch_size=max_batch_size,
-        socket_path=get_server_address(ckpt_path_str),
+        fast_decoder_loop=fast_decoder_loop,
+        socket_path=get_server_address(
+            ckpt_path,
+            lora_path=lora_path,
+            gamemode=gamemode,
+            auto_select_gamemode_model=auto_select_gamemode_model,
+        ),
     ) if use_server else model_loader(), tokenizer_loader()
 
 
-def get_server_address(ckpt_path_str: str):
+def get_server_address(
+        ckpt_path_str: str | Path | None,
+        lora_path: str | Path | None = None,
+        gamemode: int | None = None,
+        auto_select_gamemode_model: bool = True,
+):
     """
     Get a valid socket address for the OS and model version.
     """
+    resolved_ckpt_path, subfolder = resolve_model_checkpoint_path(
+        ckpt_path_str,
+        gamemode=gamemode,
+        auto_select_gamemode_model=auto_select_gamemode_model,
+    )
+    ckpt_path_str = "" if not resolved_ckpt_path else (resolved_ckpt_path.as_posix() if isinstance(resolved_ckpt_path, Path) else str(resolved_ckpt_path))
+    if subfolder:
+        ckpt_path_str = f"{ckpt_path_str}/{subfolder}"
+    ckpt_subfolder = get_model_checkpoint_subfolder(resolved_ckpt_path, subfolder)
+    effective_lora_path, _ = resolve_compatible_lora_path(
+        lora_path,
+        ckpt_subfolder=ckpt_subfolder,
+        verbose=False,
+    )
+    if effective_lora_path:
+        effective_lora_str = effective_lora_path.as_posix() if isinstance(effective_lora_path, Path) else str(effective_lora_path)
+        ckpt_path_str = f"{ckpt_path_str}__lora__{effective_lora_str}"
     ckpt_path_str = ckpt_path_str.replace(" ", "_").replace("/", "_").replace("\\", "_").replace(".", "_")
     # Check if the OS supports Unix sockets
     if os.name == 'posix':
@@ -578,22 +681,34 @@ def load_diff_model(
     return model, tokenizer
 
 
-@hydra.main(config_path="configs/inference", config_name="v30", version_base="1.1")
+@hydra.main(config_path="configs/inference", config_name="v32", version_base="1.1")
 def main(args: InferenceConfig):
     args = OmegaConf.to_object(args) if isinstance(args, DictConfig) else args
     compile_args(args)
     setup_inference_environment(args.seed)
 
-    model, tokenizer = load_model_with_server(
-        args.model_path,
-        args.train,
-        args.device,
-        max_batch_size=args.max_batch_size,
-        use_server=args.use_server,
-        precision=args.precision,
-        attn_implementation=args.attn_implementation,
-        lora_path=args.lora_path,
-    )
+    model, tokenizer = load_model_with_server(args.model_path, args.train, args.device,
+                                              max_batch_size=args.max_batch_size, use_server=args.use_server,
+                                              precision=args.precision, attn_implementation=args.attn_implementation,
+                                              lora_path=args.lora_path, gamemode=args.gamemode,
+                                              auto_select_gamemode_model=args.auto_select_gamemode_model,
+                                              fast_decoder_loop=args.fast_decoder_loop)
+
+    timing_model, timing_tokenizer = None, None
+    if should_load_separate_timing_model(args):
+        print("Using base model for timing generation.")
+        timing_model, timing_tokenizer = load_model_with_server(
+            args.model_path,
+            args.train,
+            args.device,
+            max_batch_size=args.max_batch_size,
+            use_server=args.use_server,
+            precision=args.precision,
+            attn_implementation=args.attn_implementation,
+            gamemode=args.gamemode,
+            auto_select_gamemode_model=False,
+            fast_decoder_loop=args.fast_decoder_loop,
+        )
 
     diff_model, diff_tokenizer, refine_model = None, None, None
     if args.generate_positions:
@@ -614,6 +729,8 @@ def main(args: InferenceConfig):
         beatmap_config=beatmap_config,
         model=model,
         tokenizer=tokenizer,
+        timing_model=timing_model,
+        timing_tokenizer=timing_tokenizer,
         diff_model=diff_model,
         diff_tokenizer=diff_tokenizer,
         refine_model=refine_model,

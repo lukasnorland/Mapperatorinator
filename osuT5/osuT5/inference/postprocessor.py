@@ -137,6 +137,7 @@ class Postprocessor(object):
         self.start_time = args.start_time
         self.end_time = args.end_time
         self.has_sv = args.train.data.add_sv
+        self.snap_near_perfect_overlaps_enabled = args.snap_near_perfect_overlaps
 
         self.logger = logging.getLogger(__name__) if logger is None else logger.getChild(__name__)
 
@@ -174,7 +175,8 @@ class Postprocessor(object):
         groups, _ = get_groups(events, types_first=self.types_first)
         last_x, last_y = 256, 192
 
-        self.snap_near_perfect_overlaps(groups)
+        if self.snap_near_perfect_overlaps_enabled:
+            self.snap_near_perfect_overlaps(groups)
 
         # Prepare unnormalizing scroll speed changes in mania
         last_time = max(group.time for group in groups) if len(groups) > 0 else 0
@@ -217,6 +219,9 @@ class Postprocessor(object):
                     timing = self.set_sv(timedelta(milliseconds=int(round(group.time))), group.scroll_speed, timing)
 
             elif hit_type == EventType.HOLD_NOTE:
+                if hold_note_start is not None:
+                    self.logger.warning(f"Warning: Incomplete hold note at {int(round(hold_note_start.time))}")
+
                 hold_note_start = group
 
             elif hit_type == EventType.HOLD_NOTE_END and hold_note_start is not None:
@@ -234,6 +239,9 @@ class Postprocessor(object):
                 hold_note_start = None
 
             elif hit_type == EventType.DRUMROLL:
+                if drumroll_start is not None:
+                    self.logger.warning(f"Warning: Incomplete drumroll at {int(round(drumroll_start.time))}")
+
                 drumroll_start = group
 
             elif hit_type == EventType.DRUMROLL_END and drumroll_start is not None:
@@ -269,6 +277,9 @@ class Postprocessor(object):
                 drumroll_start = None
 
             elif hit_type == EventType.DENDEN:
+                if denden_start is not None:
+                    self.logger.warning(f"Warning: Incomplete denden at {int(round(denden_start.time))}")
+
                 denden_start = group
 
             elif hit_type == EventType.DENDEN_END and denden_start is not None:
@@ -287,6 +298,9 @@ class Postprocessor(object):
                 denden_start = None
 
             elif hit_type == EventType.SPINNER:
+                if spinner_start is not None:
+                    self.logger.warning(f"Warning: Incomplete spinner at {int(round(spinner_start.time))}")
+
                 spinner_start = group
 
             elif hit_type == EventType.SPINNER_END and spinner_start is not None:
@@ -429,7 +443,7 @@ class Postprocessor(object):
             timing = [tp for tp in timing if tp.offset >= first_timing_point.offset]
 
         # Write .osu file
-        with open(OSU_TEMPLATE_PATH, "r") as tf:
+        with open(OSU_TEMPLATE_PATH, "r", encoding="utf-8") as tf:
             template = Template(tf.read())
             hit_objects = {"hit_objects": "\n".join(hit_object_strings)}
             timing_points = {"timing_points": "\n".join(tp.pack() for tp in timing)}
@@ -491,18 +505,18 @@ class Postprocessor(object):
 
         return beatmap.pack()
 
-    def write_result(self, result: str, output_path: str):
+    def write_result(self, output_path: str, result: str):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         # Write .osu file to directory
         with open(output_path, "w", encoding='utf-8-sig') as osu_file:
             osu_file.write(result)
 
-    def export_osz(self, osu_path: str, audio_path: str, output_path: str, background_path: str = None):
+    def export_osz(self, output_path: str, osu_content: str, osu_filename: str, audio_path: str, background_path: str = None):
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
         with zipfile.ZipFile(output_path, 'w') as zipf:
-            zipf.write(osu_path, os.path.basename(osu_path))
+            zipf.writestr(osu_filename, osu_content)
             zipf.write(audio_path, os.path.basename(audio_path))
 
             # Add background image if provided and exists
@@ -623,19 +637,19 @@ class Postprocessor(object):
         if len(timing) == 0:
             return time
 
-        before_tp = self.timing_point_at(timedelta(milliseconds=time), timing)
-        before_tp = before_tp if before_tp.parent is None else before_tp.parent
-        before_time = round(before_tp.offset.total_seconds() * 1000)
+        current_tp = self.timing_point_at(timedelta(milliseconds=time), timing)
+        current_tp = current_tp if current_tp.parent is None else current_tp.parent
+        current_tp_time = round(current_tp.offset.total_seconds() * 1000)
+        before_tp = self.timing_point_at(timedelta(milliseconds=current_tp_time - 1), timing)
         after_tp = self.uninherited_timing_point_after(timedelta(milliseconds=time), timing)
-        after_time = round(after_tp.offset.total_seconds() * 1000) if after_tp is not None else None
+        after_tp_time = round(after_tp.offset.total_seconds() * 1000) if after_tp is not None else np.inf
 
-        # If the new time is too close to the next timing point, snap to the next timing point
-        if after_time is not None and time > before_time + 10 and time >= after_time - 10:
-            return after_time
+        current_interval = (current_tp_time, after_tp_time)
 
-        def local_ticks(divisor: int) -> set[int]:
-            ms_per_tick = before_tp.ms_per_beat / divisor
-            remainder = (time - before_time) % ms_per_tick
+        def local_ticks(tp: TimingPoint, divisor: int) -> set[int]:
+            tp_time = round(tp.offset.total_seconds() * 1000)
+            ms_per_tick = tp.ms_per_beat / divisor
+            remainder = (time - tp_time) % ms_per_tick
             return {
                 int(time - remainder - ms_per_tick),
                 int(time - remainder),
@@ -643,12 +657,29 @@ class Postprocessor(object):
                 int(time - remainder + 2 * ms_per_tick)
             }
 
-        ticks = local_ticks(snap_divisor)
+        def local_ticks_minus_ignored(tp: TimingPoint, divisor: int) -> set[int]:
+            ticks = local_ticks(tp, divisor)
 
-        # Remove ticks that are from bigger snap divisors because we specifically want to snap to the snap_divisor
-        ignore_divisors = ignore_ticks.get(snap_divisor, [1])
-        for ignore_divisor in ignore_divisors:
-            ticks -= local_ticks(ignore_divisor)
+            # Remove ticks that are from bigger snap divisors because we specifically want to snap to the snap_divisor
+            ignore_divisors = ignore_ticks.get(divisor, [1])
+            for ignore_divisor in ignore_divisors:
+                ticks -= local_ticks(tp, ignore_divisor)
+            return ticks
+
+        ticks = local_ticks_minus_ignored(current_tp, snap_divisor)
+        # Trim to ticks inside current interval with margin
+        m = 20
+        ticks = {tick for tick in ticks if current_interval[0] - m <= tick <= current_interval[1] + m}
+
+        if before_tp is not None:
+            before_ticks = local_ticks_minus_ignored(before_tp, snap_divisor)
+            before_ticks = {tick for tick in before_ticks if tick <= current_interval[0] + m}
+            ticks.update(before_ticks)
+
+        if after_tp is not None:
+            after_ticks = local_ticks_minus_ignored(after_tp, snap_divisor)
+            after_ticks = {tick for tick in after_ticks if tick >= current_interval[1] - m}
+            ticks.update(after_ticks)
 
         if len(ticks) == 0:
             # If we don't have any ticks, just return the original time

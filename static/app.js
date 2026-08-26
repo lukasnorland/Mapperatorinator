@@ -1,21 +1,89 @@
 $(document).ready(function() {
+    const I18nUtils = {
+        t(key, fallback = key, params) {
+            if (typeof I18n !== 'undefined' && typeof I18n.t === 'function') {
+                const translated = I18n.t(key, params);
+                if (translated !== key) {
+                    return translated;
+                }
+            }
+
+            return fallback;
+        },
+
+        button(key, fallback, params) {
+            return this.t(`buttons.${key}`, fallback, params);
+        },
+
+        progress(key, fallback, params) {
+            return this.t(`progress.${key}`, fallback, params);
+        },
+
+        message(type, key, fallback, params) {
+            return this.t(`messages.${type}.${key}`, fallback, params);
+        },
+
+        link(key, fallback, params) {
+            return this.t(`links.${key}`, fallback, params);
+        }
+    };
+
     // Application state and configuration
     const AppState = {
         jobs: new Map(),
         jobCounter: 0,
         lastStartedJobId: null,
         animationSpeed: 300,
+        yearRange: {
+            min: 2007,
+            defaultMax: 2023,
+        },
 
         modelCapabilities: {
-            "v28": {},
-            "v29": {},
+            "v28": {
+                descriptorSet: 'omdb',
+            },
+            "v29": {
+                descriptorSet: 'omdb',
+            },
             "v30": {
                 supportedGamemodes: ['0'],
                 supportsYear: false,
                 supportedInContextOptions: ['TIMING'],
                 hideHitsoundsOption: true,
+                descriptorSet: null,
                 supportsDescriptors: false,
             },
+            "v31": {
+                descriptorSet: 'omdb',
+            },
+            "v32-mini": {
+                supportedInContextOptions: ['TIMING'],
+                descriptorSet: 'user_tags',
+                maxYear: 2024,
+            },
+            "v32": {
+                supportedInContextOptions: ['TIMING'],
+                descriptorSet: 'user_tags',
+                maxYear: 2024,
+            },
+        }
+    };
+
+    const Security = {
+        csrfToken: window.APP_BOOTSTRAP?.csrfToken || $('meta[name="mapperatorinator-csrf-token"]').attr('content') || '',
+        csrfHeaderName: window.APP_BOOTSTRAP?.csrfHeaderName || 'X-Mapperatorinator-CSRF-Token',
+
+        init() {
+            $.ajaxSetup({
+                headers: this.csrfToken ? {
+                    [this.csrfHeaderName]: this.csrfToken
+                } : {}
+            });
+
+            if (!this.csrfToken) {
+                console.error('CSRF token bootstrap data is missing; protected UI actions will fail.');
+            }
         }
     };
 
@@ -31,6 +99,28 @@ $(document).ready(function() {
             setTimeout(() => messageDiv.remove(), 5000);
         },
 
+        showTranslatedFlashMessage(keyPath, fallback, type = 'success', params) {
+            this.showFlashMessage(I18nUtils.t(keyPath, fallback, params), type);
+        },
+
+        translateValidationMessage(message) {
+            if (!message) {
+                return message;
+            }
+
+            if (message.includes('Audio file not found')) {
+                return I18nUtils.message('error', 'audio_not_found', 'Audio file not found');
+            }
+            if (message.includes('Beatmap file not found')) {
+                return I18nUtils.message('error', 'beatmap_not_found', 'Beatmap file not found');
+            }
+            if (message.includes('Beatmap file must have .osu extension')) {
+                return I18nUtils.message('error', 'beatmap_invalid_ext', 'Beatmap file must have .osu extension');
+            }
+
+            return message;
+        },
+
         smoothScroll(target, offset = 0) {
             $('html, body').animate({
                 scrollTop: $(target).offset().top + offset
@@ -41,8 +131,8 @@ $(document).ready(function() {
             $('#inferenceForm')[0].reset();
 
             // Clear descriptors
-            $('input[name="descriptors"], input[name="in_context_options"]')
-                .removeClass('positive-check negative-check').prop('checked', false);
+            DescriptorManager.clearSelections();
+            $('input[name="in_context_options"]').prop('checked', false);
 
             ValidationManager.clearPlaceholders();
             return ValidationManager.validateAndAutofill(false);
@@ -141,6 +231,44 @@ $(document).ready(function() {
             });
         },
 
+        getYearMaxForModel(model) {
+            const capabilities = AppState.modelCapabilities[model] || {};
+            return capabilities.maxYear || AppState.yearRange.defaultMax;
+        },
+
+        updateYearSettings() {
+            const selectedModel = $("#model").val();
+            const yearMin = AppState.yearRange.min;
+            const yearMax = this.getYearMaxForModel(selectedModel);
+            const $yearInput = $('#year');
+            const $yearLabel = $('label[for="year"]');
+            const translationParams = JSON.stringify({ min: yearMin, max: yearMax });
+
+            $yearInput.attr({
+                min: yearMin,
+                max: yearMax,
+            });
+            $yearLabel.attr('data-i18n-params', translationParams);
+            $yearLabel.attr('data-i18n-title-params', translationParams);
+
+            const currentValue = $yearInput.val().trim();
+            if (currentValue !== '') {
+                const numericValue = Number(currentValue);
+                if (!Number.isNaN(numericValue)) {
+                    if (numericValue > yearMax) {
+                        $yearInput.val(String(yearMax));
+                    } else if (numericValue < yearMin) {
+                        $yearInput.val(String(yearMin));
+                    }
+                }
+            }
+
+            const labelText = I18nUtils.t('labels.year', 'Year ({min}-{max})', { min: yearMin, max: yearMax });
+            const tooltipText = I18nUtils.t('tooltips.year', 'Year of the song ({min}-{max})', { min: yearMin, max: yearMax });
+            $yearLabel.text(`${labelText}:`);
+            $yearLabel.attr('title', tooltipText);
+        },
+
         updateModelSettings() {
             const selectedModel = $("#model").val();
             const capabilities = AppState.modelCapabilities[selectedModel] || {};
@@ -182,7 +310,9 @@ $(document).ready(function() {
                 $('#hitsounded').prop('checked', true);
             }
 
+            this.updateYearSettings();
             this.updateConditionalFields();
+            DescriptorManager.renderCurrentDescriptors();
         }
     };
 
@@ -225,7 +355,7 @@ $(document).ready(function() {
 
                     if (path) {
                         if (targetId === 'beatmap_path' && !path.toLowerCase().endsWith('.osu')) {
-                            Utils.showFlashMessage('Please select a valid .osu file.', 'error');
+                            Utils.showTranslatedFlashMessage('messages.error.invalid_osu_file', 'Please select a valid .osu file.', 'error');
                             // Set the path and let validation handle inline error
                         }
 
@@ -239,7 +369,7 @@ $(document).ready(function() {
                     }
                 } catch (error) {
                     console.error(`Error browsing for ${browseType}:`, error);
-                    alert(`Could not browse for ${browseType}. Ensure the backend API is running.`);
+                    alert(I18nUtils.message('error', 'browse_failed', 'Could not browse. Ensure the backend API is running.'));
                 }
             });
         }
@@ -283,7 +413,7 @@ $(document).ready(function() {
                     error: (xhr, status, error) => {
                         console.error('Path validation failed:', error);
                         if (showFlashMessages) {
-                            Utils.showFlashMessage('Error validating paths. Check console for details.', 'error');
+                            Utils.showTranslatedFlashMessage('messages.error.validation_failed', 'Error validating paths. Check console for details.', 'error');
                         }
                         this.clearPlaceholders();
                         resolve(false);
@@ -336,7 +466,7 @@ $(document).ready(function() {
             if (showFlashMessages) {
                 // Show errors as flash messages and inline indicators
                 response.errors.forEach(error => {
-                    Utils.showFlashMessage(error, 'error');
+                    Utils.showFlashMessage(Utils.translateValidationMessage(error), 'error');
                 });
             }
 
@@ -354,11 +484,11 @@ $(document).ready(function() {
             const beatmapPathVal = $('#beatmap_path').val().trim();
 
             if (error.includes('Audio file not found') && (audioPathVal || beatmapPathVal)) {
-                this.showInlineError('#audio_path', 'Audio file not found');
+                this.showInlineError('#audio_path', I18nUtils.message('error', 'audio_not_found', 'Audio file not found'));
             } else if (error.includes('Beatmap file not found') && beatmapPathVal) {
-                this.showInlineError('#beatmap_path', 'Beatmap file not found');
+                this.showInlineError('#beatmap_path', I18nUtils.message('error', 'beatmap_not_found', 'Beatmap file not found'));
             } else if (error.includes('Beatmap file must have .osu extension') && beatmapPathVal) {
-                this.showInlineError('#beatmap_path', 'Must be .osu file');
+                this.showInlineError('#beatmap_path', I18nUtils.message('error', 'beatmap_invalid_ext', 'Beatmap file must have .osu extension'));
             }
         },
 
@@ -388,16 +518,165 @@ $(document).ready(function() {
 
     // Descriptor Manager
     const DescriptorManager = {
+        descriptorSets: {},
+        selectionStates: new Map(),
+
         init() {
+            this.descriptorSets = window.APP_BOOTSTRAP?.descriptorSets || {};
+
             this.attachDropdownHandler();
             this.attachDescriptorClickHandlers();
+
+            window.addEventListener('languageChanged', () => this.renderCurrentDescriptors());
+        },
+
+        buildDescriptorInputId(setName, value) {
+            const slug = value
+                .toString()
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-');
+            return `desc-${setName}-${slug}`;
+        },
+
+        formatGroupTitle(title = '') {
+            return title
+                .toString()
+                .split(/[_\s]+/)
+                .filter(Boolean)
+                .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+                .join(' ');
+        },
+
+        getActiveDescriptorSetName() {
+            const selectedModel = $('#model').val();
+            const capabilities = AppState.modelCapabilities[selectedModel] || {};
+            return Object.prototype.hasOwnProperty.call(capabilities, 'descriptorSet')
+                ? capabilities.descriptorSet
+                : 'omdb';
+        },
+
+        getActiveDescriptorGroups() {
+            const descriptorSetName = this.getActiveDescriptorSetName();
+            if (!descriptorSetName) {
+                return [];
+            }
+
+            const selectedGamemode = $('#gamemode').val();
+            const descriptorSet = this.descriptorSets[descriptorSetName];
+            const groups = descriptorSet?.groups || [];
+
+            return groups
+                .map((group) => ({
+                    ...group,
+                    items: (group.items || []).filter((item) => item.rulesetId === null || item.rulesetId === undefined || String(item.rulesetId) === String(selectedGamemode))
+                }))
+                .filter((group) => group.items.length > 0);
+        },
+
+        renderCurrentDescriptors() {
+            const $dropdown = $('.custom-dropdown-descriptors');
+            const $container = $dropdown.find('.descriptors-container');
+            const descriptorSetName = this.getActiveDescriptorSetName();
+
+            if (!descriptorSetName) {
+                $container.empty();
+                $dropdown.removeClass('open');
+                $dropdown.find('.dropdown-content').attr('inert', '');
+                if ($dropdown.is(':visible')) {
+                    $dropdown.stop(true, true).slideUp(AppState.animationSpeed);
+                }
+                return;
+            }
+
+            const groups = this.getActiveDescriptorGroups();
+            $container.empty();
+
+            groups.forEach((group) => {
+                const $group = $('<div>').addClass('descriptor-group');
+                const $heading = $('<h3>').text(group.title || this.formatGroupTitle(group.key || ''));
+                const groupTitleKey = group.titleKey || `descriptors.${descriptorSetName}.groups.${group.key}`;
+
+                if (groupTitleKey) {
+                    $heading.attr('data-i18n', groupTitleKey);
+                }
+
+                $group.append($heading);
+
+                (group.items || []).forEach((item) => {
+                    const inputId = this.buildDescriptorInputId(descriptorSetName, item.value);
+                    const translationBase = item.translationKey
+                        ? `descriptors.${descriptorSetName}.items.${item.translationKey}`
+                        : null;
+                    const $item = $('<div>').addClass('descriptor-item');
+                    const $checkbox = $('<input>')
+                        .attr({
+                            type: 'checkbox',
+                            id: inputId,
+                            name: 'descriptors',
+                            value: item.value,
+                        });
+                    const $label = $('<label>')
+                        .attr('for', inputId)
+                        .text(item.label || item.value);
+
+                    if (item.labelKey || translationBase) {
+                        $label.attr('data-i18n', item.labelKey || `${translationBase}.label`);
+                    }
+                    if (item.titleKey || translationBase) {
+                        $label.attr('data-i18n-title', item.titleKey || `${translationBase}.tooltip`);
+                    }
+                    if (item.title) {
+                        $label.attr('title', item.title);
+                    }
+
+                    $item.append($checkbox, $label);
+                    $group.append($item);
+                });
+
+                $container.append($group);
+            });
+
+            if (!$dropdown.is(':visible')) {
+                $dropdown.stop(true, true).slideDown(AppState.animationSpeed);
+            }
+
+            if (typeof I18n !== 'undefined' && typeof I18n.applyTranslations === 'function') {
+                I18n.applyTranslations();
+            }
+
+            this.syncRenderedSelections();
+        },
+
+        syncRenderedSelections() {
+            $('.descriptors-container input[name="descriptors"]').each((_, element) => {
+                const $checkbox = $(element);
+                const state = this.selectionStates.get($checkbox.val()) || 'neutral';
+                this.applyCheckboxState($checkbox, state);
+            });
+        },
+
+        applyCheckboxState($checkbox, state) {
+            $checkbox.removeClass('positive-check negative-check');
+
+            if (state === 'positive') {
+                $checkbox.addClass('positive-check').prop('checked', true);
+            } else if (state === 'negative') {
+                $checkbox.addClass('negative-check').prop('checked', true);
+            } else {
+                $checkbox.prop('checked', false);
+            }
         },
 
         attachDropdownHandler() {
             $('.custom-dropdown-descriptors .dropdown-header').on('click', function() {
                 const $dropdown = $(this).parent();
-                const dropdownContent = document.querySelector('.dropdown-content');
+                const dropdownContent = $dropdown.find('.dropdown-content').get(0);
                 $dropdown.toggleClass('open');
+                if (!dropdownContent) {
+                    return;
+                }
+
                 if ($dropdown.hasClass('open')) {
                     Utils.smoothScroll('.custom-dropdown-descriptors');
                     dropdownContent.removeAttribute('inert');
@@ -407,6 +686,51 @@ $(document).ready(function() {
             });
         },
 
+        setDescriptorState($checkbox, state) {
+            const value = $checkbox.val();
+
+            if (state === 'positive' || state === 'negative') {
+                this.selectionStates.set(value, state);
+            } else {
+                this.selectionStates.delete(value);
+            }
+
+            this.applyCheckboxState($checkbox, state);
+        },
+
+        clearSelections() {
+            this.selectionStates.clear();
+            this.syncRenderedSelections();
+        },
+
+        getSelections() {
+            const selections = { positive: [], negative: [] };
+
+            $('input[name="descriptors"]').each(function() {
+                const $checkbox = $(this);
+                if ($checkbox.hasClass('positive-check')) {
+                    selections.positive.push($checkbox.val());
+                } else if ($checkbox.hasClass('negative-check')) {
+                    selections.negative.push($checkbox.val());
+                }
+            });
+
+            return selections;
+        },
+
+        applySelections(descriptors = {}) {
+            this.selectionStates.clear();
+            (descriptors.positive || []).forEach((value) => {
+                this.selectionStates.set(value, 'positive');
+            });
+
+            (descriptors.negative || []).forEach((value) => {
+                this.selectionStates.set(value, 'negative');
+            });
+
+            this.syncRenderedSelections();
+        },
+
         attachDescriptorClickHandlers() {
             $('.descriptors-container').on('click', 'input[name="descriptors"]', function(e) {
                 e.preventDefault();
@@ -414,15 +738,13 @@ $(document).ready(function() {
 
                 if (!$checkbox.prop('disabled')) {
                     if ($checkbox.hasClass('positive-check')) {
-                        $checkbox.removeClass('positive-check').addClass('negative-check');
+                        DescriptorManager.setDescriptorState($checkbox, 'negative');
                     } else if ($checkbox.hasClass('negative-check')) {
-                        $checkbox.removeClass('negative-check');
-                        $checkbox.prop('checked', false);
+                        DescriptorManager.setDescriptorState($checkbox, 'neutral');
                         return;
                     } else {
-                        $checkbox.addClass('positive-check');
+                        DescriptorManager.setDescriptorState($checkbox, 'positive');
                     }
-                    $checkbox.prop('checked', true);
                 }
             });
         }
@@ -468,15 +790,7 @@ $(document).ready(function() {
             });
 
             // Export descriptors
-            $('input[name="descriptors"]').each(function() {
-                const $checkbox = $(this);
-                const value = $checkbox.val();
-                if ($checkbox.hasClass('positive-check')) {
-                    config.descriptors.positive.push(value);
-                } else if ($checkbox.hasClass('negative-check')) {
-                    config.descriptors.negative.push(value);
-                }
-            });
+            config.descriptors = DescriptorManager.getSelections();
 
             // Export in-context options
             $('input[name="in_context_options"]:checked').each(function() {
@@ -492,7 +806,7 @@ $(document).ready(function() {
 
                 const filePath = await window.pywebview.api.save_file(filename);
                 if (!filePath) {
-                    this.showConfigStatus("Export cancelled by user", "error");
+                    this.showConfigStatus(I18nUtils.message('error', 'export_cancelled', 'Export cancelled by user'), "error");
                     return;
                 }
 
@@ -505,13 +819,13 @@ $(document).ready(function() {
                     },
                     success: (response) => {
                         if (response.success) {
-                            this.showConfigStatus(`Configuration exported successfully to: ${response.file_path}`, "success");
+                            this.showConfigStatus(`${I18nUtils.message('success', 'config_exported', 'Configuration exported successfully')}: ${response.file_path}`, "success");
                         } else {
-                            this.showConfigStatus(`Error saving config: ${response.error}`, "error");
+                            this.showConfigStatus(`${I18nUtils.message('error', 'save_failed', 'Failed to save configuration')}: ${response.error}`, "error");
                         }
                     },
                     error: () => {
-                        this.showConfigStatus("Failed to save config to server. Using browser download instead.", "error");
+                        this.showConfigStatus(I18nUtils.message('error', 'save_failed', 'Failed to save configuration'), "error");
                         this.fallbackDownload(config);
                     }
                 });
@@ -531,15 +845,15 @@ $(document).ready(function() {
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
-            this.showConfigStatus("Configuration exported successfully (browser download)", "success");
+            this.showConfigStatus(I18nUtils.message('success', 'config_exported', 'Configuration exported successfully'), "success");
         },
 
         resetToDefaults() {
-            if (confirm("Are you sure you want to reset all settings to default values? This cannot be undone.")) {
+            if (confirm(I18nUtils.message('confirm', 'reset_settings', 'Are you sure you want to reset all settings to default values? This cannot be undone.'))) {
                 Utils.resetFormToDefaults();
                 $("#model, #gamemode, #beatmap_path").trigger('change');
                 $(UIManager.clearable_inputs).trigger('blur');
-                this.showConfigStatus("All settings reset to default values", "success");
+                this.showConfigStatus(I18nUtils.message('success', 'settings_reset', 'All settings reset to default values'), "success");
             }
         },
 
@@ -548,7 +862,7 @@ $(document).ready(function() {
             if (!file) return;
 
             if (file.type !== 'application/json' && !file.name.endsWith('.json')) {
-                this.showConfigStatus("Please select a valid JSON configuration file.", "error");
+                this.showConfigStatus(I18nUtils.message('error', 'config_invalid', 'Please select a valid JSON configuration file.'), "error");
                 return;
             }
 
@@ -562,7 +876,7 @@ $(document).ready(function() {
             try {
                 const config = JSON.parse(content);
                 if (!config.version) {
-                    throw new Error("Invalid configuration file format");
+                    throw new Error(I18nUtils.message('error', 'config_invalid', 'Please select a valid JSON configuration file.'));
                 }
 
                 // Import settings
@@ -580,17 +894,7 @@ $(document).ready(function() {
                 }
 
                 // Import descriptors
-                $('input[name="descriptors"]').removeClass('positive-check negative-check').prop('checked', false);
-                if (config.descriptors) {
-                    config.descriptors.positive?.forEach(value => {
-                        $(`input[name="descriptors"][value="${value}"]`)
-                            .addClass('positive-check').prop('checked', true);
-                    });
-                    config.descriptors.negative?.forEach(value => {
-                        $(`input[name="descriptors"][value="${value}"]`)
-                            .addClass('negative-check').prop('checked', true);
-                    });
-                }
+                DescriptorManager.applySelections(config.descriptors);
 
                 // Import in-context options
                 $('input[name="in_context_options"]').prop('checked', false);
@@ -603,11 +907,12 @@ $(document).ready(function() {
                 $(UIManager.clearable_inputs).trigger('blur');
                 $(UIManager.clearable_inputs).trigger('input');
 
-                this.showConfigStatus(`Configuration imported successfully! (${config.timestamp || 'Unknown date'})`, "success");
+                const timestampSuffix = config.timestamp ? ` (${config.timestamp})` : '';
+                this.showConfigStatus(`${I18nUtils.message('success', 'config_imported', 'Configuration imported successfully!')}${timestampSuffix}`, "success");
 
             } catch (error) {
                 console.error("Error importing configuration:", error);
-                this.showConfigStatus(`Error importing configuration: ${error.message}`, "error");
+                this.showConfigStatus(`${I18nUtils.message('error', 'config_import_failed', 'Error importing configuration')}: ${error.message}`, "error");
             }
         },
 
@@ -624,6 +929,75 @@ $(document).ready(function() {
     const InferenceManager = {
         init() {
             $('#inferenceForm').submit((e) => this.handleSubmit(e));
+            window.addEventListener('languageChanged', () => this.refreshAllJobTranslations());
+        },
+
+        setJobStatus(job, key, fallback, params) {
+            job.statusTranslationKey = key;
+            job.statusFallback = fallback;
+            job.statusParams = params;
+            job.elements.$status.text(I18nUtils.t(key, fallback, params));
+        },
+
+        refreshJobTranslations(job) {
+            if (!job?.elements) {
+                return;
+            }
+
+            job.elements.$card.find('.progress-card-close')
+                .attr('title', I18nUtils.button('remove', 'Remove'));
+            job.elements.$warningText.text(I18nUtils.progress('warning_detected', 'Warning on this job (Will continue to generate)'));
+            job.elements.$initMessage.text(I18nUtils.progress('initializing', 'Initializing process... This may take a moment.'));
+            job.elements.$warningLogLinkAnchor.text(I18nUtils.link('view_warning_log', 'View warning log'));
+            job.elements.$beatmapLinkAnchor.text(I18nUtils.link('open_folder', 'Click here to open the folder containing your map.'));
+            job.elements.$errorLogLinkAnchor.text(I18nUtils.link('open_log', 'See why... (opens error log)'));
+            job.elements.$throughputLabel.text(I18nUtils.progress('throughput', 'Throughput'));
+
+            if (job.latestTokensPerSecond !== null) {
+                job.elements.$throughputValue.text(`${job.latestTokensPerSecond} tok/s`);
+            }
+
+            if (job.cancelState === 'cancelling') {
+                job.elements.$cancelButton.text(I18nUtils.button('cancelling', 'Cancelling...'));
+            } else {
+                job.elements.$cancelButton.text(I18nUtils.button('cancel', 'Cancel'));
+            }
+
+            if (job.statusTranslationKey) {
+                this.setJobStatus(job, job.statusTranslationKey, job.statusFallback, job.statusParams);
+            }
+        },
+
+        refreshAllJobTranslations() {
+            AppState.jobs.forEach((job) => this.refreshJobTranslations(job));
+        },
+
+        setJobThroughput(job, tokensPerSecondText) {
+            const normalizedText = (tokensPerSecondText || '').toString().trim();
+            if (!normalizedText) {
+                job.latestTokensPerSecond = null;
+                job.elements.$throughputValue.text('');
+                job.elements.$throughputContainer.hide();
+                return;
+            }
+
+            job.latestTokensPerSecond = normalizedText;
+            job.elements.$throughputValue.text(`${normalizedText} tok/s`);
+            job.elements.$throughputContainer.show();
+        },
+
+        extractTokensPerSecond(messageData) {
+            if (!messageData) {
+                return null;
+            }
+
+            const directMatch = messageData.match(/(\d+(?:\.\d+)?)\s+tok\/s\b/i);
+            if (directMatch) {
+                return directMatch[1];
+            }
+
+            const keyedMatch = messageData.match(/tok\/s\s*[=:]\s*(\d+(?:\.\d+)?)/i);
+            return keyedMatch ? keyedMatch[1] : null;
         },
 
         async handleSubmit(e) {
@@ -652,21 +1026,21 @@ $(document).ready(function() {
 
             if (!audioPath && !beatmapPath) {
                 Utils.smoothScroll(0);
-                Utils.showFlashMessage("Either 'Beatmap Path' or 'Audio Path' are required for running inference", 'error');
+                Utils.showTranslatedFlashMessage('messages.error.audio_or_beatmap_required', "Either 'Beatmap Path' or 'Audio Path' are required for running inference", 'error');
                 return false;
             }
 
             if (!outputPath && !beatmapPath) {
                 Utils.smoothScroll(0);
-                Utils.showFlashMessage("Either 'Output Path' or 'Beatmap Path' are required for running inference", 'error');
+                Utils.showTranslatedFlashMessage('messages.error.output_or_beatmap_required', "Either 'Output Path' or 'Beatmap Path' are required for running inference", 'error');
                 return false;
             }
 
             // Validate beatmap file type if beatmap path is provided
             if (beatmapPath && !beatmapPath.toLowerCase().endsWith('.osu')) {
                 Utils.smoothScroll('#beatmap_path');
-                Utils.showFlashMessage("Beatmap file must have .osu extension", 'error');
-                ValidationManager.showInlineError('#beatmap_path', 'Must be .osu file');
+                Utils.showTranslatedFlashMessage('messages.error.beatmap_invalid_ext', 'Beatmap file must have .osu extension', 'error');
+                ValidationManager.showInlineError('#beatmap_path', I18nUtils.message('error', 'beatmap_invalid_ext', 'Beatmap file must have .osu extension'));
                 return false;
             }
 
@@ -693,6 +1067,10 @@ $(document).ready(function() {
                         <button type="button" class="progress-card-close" title="Remove">×</button>
                     </div>
                     <div class="progress-card-status">Starting...</div>
+                    <div class="progress-card-throughput" style="display:none;">
+                        <span class="progress-card-throughput-label">Throughput</span>
+                        <span class="progress-card-throughput-value"></span>
+                    </div>
                     <div class="warning-text" style="display:none; font-size: 12px; color: var(--accent-color); margin-top: 4px;">
                         Warning on this job (Will continue to generate)
                     </div>
@@ -732,6 +1110,8 @@ $(document).ready(function() {
                 warningCaptureActive: false,
                 warningCaptureRemaining: 0,
                 warningSuppressed: false,
+                cancelState: 'idle',
+                latestTokensPerSecond: null,
                 evtSource: null,
                 isCancelled: false,
                 inferenceErrorOccurred: false,
@@ -740,6 +1120,9 @@ $(document).ready(function() {
                 elements: {
                     $card,
                     $status: $card.find('.progress-card-status'),
+                    $throughputContainer: $card.find('.progress-card-throughput'),
+                    $throughputLabel: $card.find('.progress-card-throughput-label'),
+                    $throughputValue: $card.find('.progress-card-throughput-value'),
                     $warningText: $card.find('.warning-text'),
                     $initMessage: $card.find('.init-message'),
                     $progressBar: $card.find('.progressBar'),
@@ -757,6 +1140,9 @@ $(document).ready(function() {
 
             $card.find('.progress-card-close').on('click', () => this.requestClose(job, $card));
             job.elements.$cancelButton.on('click', () => this.requestCancel(job));
+
+            this.setJobStatus(job, 'progress.starting', 'Starting...');
+            this.refreshJobTranslations(job);
 
             AppState.jobs.set(tempKey, job);
             return job;
@@ -813,20 +1199,11 @@ $(document).ready(function() {
 
             // Handle descriptors
             formData.delete('descriptors');
-            const positiveDescriptors = [];
-            const negativeDescriptors = [];
+            formData.delete('negative_descriptors');
+            const descriptorSelections = DescriptorManager.getSelections();
 
-            $('input[name="descriptors"]').each(function() {
-                const $cb = $(this);
-                if ($cb.hasClass('positive-check')) {
-                    positiveDescriptors.push($cb.val());
-                } else if ($cb.hasClass('negative-check')) {
-                    negativeDescriptors.push($cb.val());
-                }
-            });
-
-            positiveDescriptors.forEach(val => formData.append('descriptors', val));
-            negativeDescriptors.forEach(val => formData.append('negative_descriptors', val));
+            descriptorSelections.positive.forEach(val => formData.append('descriptors', val));
+            descriptorSelections.negative.forEach(val => formData.append('negative_descriptors', val));
 
             // Ensure hitsounded is true for V30
             if ($("#model").val() === "v30" && !$("#option-item-hitsounded").is(':visible')) {
@@ -874,12 +1251,13 @@ $(document).ready(function() {
                 success: (response) => {
                     const jobId = response.job_id;
                     if (!jobId) {
-                        Utils.showFlashMessage("Failed to start inference: missing job id.", 'error');
+                        Utils.showTranslatedFlashMessage('messages.error.start_failed', 'Failed to start inference process. Check backend console.', 'error');
                         this.removeJob(job.id || job.tempKey, job.elements.$card);
                         return;
                     }
                     job.id = jobId;
-                    job.elements.$cancelButton.show().prop('disabled', false).text('Cancel');
+                    job.cancelState = 'idle';
+                    job.elements.$cancelButton.show().prop('disabled', false).text(I18nUtils.button('cancel', 'Cancel'));
                     job.elements.$card.attr('data-job-id', jobId);
                     AppState.jobs.delete(job.tempKey);
                     AppState.jobs.set(jobId, job);
@@ -982,20 +1360,25 @@ $(document).ready(function() {
             // Update progress title based on message content
             const lowerCaseMessage = messageData.toLowerCase();
             const progressTitles = {
-                "generating timing": "Generating Timing",
-                "generating kiai": "Generating Kiai",
-                "generating map": "Generating Map",
-                "seq len": "Refining Positions"
+                "generating timing": ['progress.generating_timing', 'Generating Timing'],
+                "generating kiai": ['progress.generating_kiai', 'Generating Kiai'],
+                "generating map": ['progress.generating_map', 'Generating Map'],
+                "seq len": ['progress.refining_positions', 'Refining Positions']
             };
 
-            Object.entries(progressTitles).forEach(([keyword, title]) => {
+            Object.entries(progressTitles).forEach(([keyword, [key, fallback]]) => {
                 if (lowerCaseMessage.includes(keyword)) {
-                    job.elements.$status.text(title);
+                    this.setJobStatus(job, key, fallback);
                     if (job.stage !== 'generating') {
                         job.stage = 'generating';
                     }
                 }
             });
+
+            const tokensPerSecond = this.extractTokensPerSecond(messageData);
+            if (tokensPerSecond !== null) {
+                this.setJobThroughput(job, tokensPerSecond);
+            }
 
             // Update progress bar
             const progressMatch = messageData.match(/^\s*(\d+)%\|/);
@@ -1015,13 +1398,17 @@ $(document).ready(function() {
 
                     job.elements.$beatmapLinkAnchor
                         .attr("href", "#")
-                        .text("Click here to open the folder containing your map.")
+                        .text(I18nUtils.link('open_folder', 'Click here to open the folder containing your map.'))
                         .off("click")
                         .on("click", (e) => {
                             e.preventDefault();
-                            $.get("/open_folder", { folder: folderPath })
+                            $.ajax({
+                                url: "/open_folder",
+                                method: "POST",
+                                data: { folder: folderPath }
+                            })
                                 .done(response => console.log("Open folder response:", response))
-                                .fail(() => alert("Failed to open folder via backend."));
+                                .fail(() => alert(I18nUtils.message('error', 'open_folder_failed', 'Failed to open folder via backend.')));
                         });
                     job.elements.$beatmapLink.show();
                 }
@@ -1039,11 +1426,12 @@ $(document).ready(function() {
 
             if (!job.isCancelled && !job.inferenceErrorOccurred) {
                 job.inferenceErrorOccurred = true;
-                job.accumulatedErrorMessages.push("Error: Connection to process stream lost.");
-                job.elements.$status.text("Connection Error").css('color', 'var(--accent-color)');
+                job.accumulatedErrorMessages.push(I18nUtils.message('error', 'connection_lost', 'Error: Connection to process stream lost.'));
+                this.setJobStatus(job, 'progress.connection_error', 'Connection Error');
+                job.elements.$status.css('color', 'var(--accent-color)');
                 job.elements.$progressBar.addClass('error');
                 job.elements.$card.data('status', 'error');
-                Utils.showFlashMessage("Error: Connection to process stream lost.", "error");
+                Utils.showTranslatedFlashMessage('messages.error.connection_lost', 'Error: Connection to process stream lost.', 'error');
             }
 
             job.elements.$cancelButton.hide();
@@ -1063,7 +1451,8 @@ $(document).ready(function() {
             }
 
             if (job.isCancelled) {
-                job.elements.$status.text("Cancelled").css('color', 'var(--accent-color)');
+                this.setJobStatus(job, 'progress.cancelled', 'Cancelled');
+                job.elements.$status.css('color', 'var(--accent-color)');
                 job.elements.$progressBar.addClass('error');
                 job.elements.$card.data('status', 'cancelled');
             } else if (job.inferenceErrorOccurred) {
@@ -1076,43 +1465,50 @@ $(document).ready(function() {
                 this.handleInferenceError(job);
                 job.elements.$card.data('status', 'error');
             } else {
-                job.elements.$status.text("Processing Complete").css('color', '');
+                this.setJobStatus(job, 'progress.processing_complete', 'Processing Complete');
+                job.elements.$status.css('color', '');
                 job.elements.$progressBar.css("width", "100%").removeClass('error');
                 job.elements.$card.data('status', 'completed');
             }
 
             job.elements.$cancelButton.hide();
             job.isCancelled = false;
+            job.cancelState = 'idle';
         },
 
         handleInferenceError(job) {
             const fullErrorText = job.accumulatedErrorMessages.join("\\n");
-            let specificError = "An error occurred during processing. Check console/logs.";
+            let specificError = I18nUtils.message('error', 'generation_error', 'There was an error while creating the beatmap. Check console/logs for details.');
 
             if (fullErrorText.includes("FileNotFoundError:")) {
                 const fileNotFoundMatch = fullErrorText.match(/FileNotFoundError:.*? file (.*?) not found/);
                 specificError = fileNotFoundMatch?.[1] ?
-                    `Error: File not found - ${fileNotFoundMatch[1].replace(/\\\\/g, '\\\\')}` :
-                    "Error: A required file was not found.";
+                    `${I18nUtils.message('error', 'file_not_found', 'Error: A required file was not found.')}: ${fileNotFoundMatch[1].replace(/\\\\/g, '\\\\')}` :
+                    I18nUtils.message('error', 'file_not_found', 'Error: A required file was not found.');
             } else if (fullErrorText.includes("HYDRA_FULL_ERROR=1")) {
-                specificError = "There was an error while creating the beatmap. Check console/logs for details.";
+                specificError = I18nUtils.message('error', 'generation_error', 'There was an error while creating the beatmap. Check console/logs for details.');
             } else if (fullErrorText.includes("Error executing job")) {
-                specificError = "There was an error starting or executing the generation task.";
+                specificError = I18nUtils.message('error', 'task_error', 'There was an error starting or executing the generation task.');
             } else if (fullErrorText.includes("Connection to process stream lost")) {
-                specificError = "Error: Connection to the generation process was lost.";
+                specificError = I18nUtils.message('error', 'connection_lost', 'Error: Connection to process stream lost.');
             }
 
             Utils.showFlashMessage(specificError, "error");
-            job.elements.$status.text("Processing Failed").css('color', 'var(--accent-color)').show();
+            this.setJobStatus(job, 'progress.processing_failed', 'Processing Failed');
+            job.elements.$status.css('color', 'var(--accent-color)').show();
             job.elements.$progressBar.css("width", "100%").addClass('error');
             job.elements.$beatmapLink.hide();
 
             if (job.errorLogFilePath) {
                 job.elements.$errorLogLinkAnchor.off("click").on("click", (e) => {
                     e.preventDefault();
-                    $.get("/open_log_file", { path: job.errorLogFilePath })
+                    $.ajax({
+                        url: "/open_log_file",
+                        method: "POST",
+                        data: { path: job.errorLogFilePath }
+                    })
                         .done(response => console.log("Open log response:", response))
-                        .fail(() => alert("Failed to open log file via backend."));
+                        .fail(() => alert(I18nUtils.message('error', 'open_log_failed', 'Failed to open log file via backend.')));
                 });
                 job.elements.$errorLogLink.show();
             }
@@ -1124,7 +1520,8 @@ $(document).ready(function() {
 
         cancelInference(job) {
             const $cancelBtn = job.elements.$cancelButton;
-            $cancelBtn.prop('disabled', true).text('Cancelling...');
+            job.cancelState = 'cancelling';
+            $cancelBtn.prop('disabled', true).text(I18nUtils.button('cancelling', 'Cancelling...'));
 
             $.ajax({
                 url: "/cancel_inference",
@@ -1132,12 +1529,13 @@ $(document).ready(function() {
                 data: { job_id: job.id },
                 success: (response) => { // Expecting JSON response
                     job.isCancelled = true;
-                    Utils.showFlashMessage(response.message || "Inference cancelled successfully.", "cancel-success");
+                    Utils.showFlashMessage(I18nUtils.message('success', 'cancel_request_sent', 'Cancel request sent'), "cancel-success");
                 },
                 error: (jqXHR) => {
-                    const errorMsg = jqXHR.responseJSON?.message || "Failed to send cancel request. Unknown error.";
+                    const errorMsg = jqXHR.responseJSON?.message || I18nUtils.message('error', 'cancel_failed', 'Failed to send cancel request. Unknown error.');
                     Utils.showFlashMessage(errorMsg, "error");
-                    $cancelBtn.prop('disabled', false).text('Cancel');
+                    job.cancelState = 'idle';
+                    $cancelBtn.prop('disabled', false).text(I18nUtils.button('cancel', 'Cancel'));
                 }
             });
         },
@@ -1177,6 +1575,8 @@ $(document).ready(function() {
             });
         }
 
+        window.addEventListener('languageChanged', () => UIManager.updateYearSettings());
+
         // Check BF16 support on page load
         $.get("/check_bf16_support", function(data) {
             if (data.supported) {
@@ -1196,6 +1596,7 @@ $(document).ready(function() {
         });
 
         // Initialize all managers
+        Security.init();
         FileBrowser.init();
         UIManager.init();
         ValidationManager.init();
@@ -1205,7 +1606,10 @@ $(document).ready(function() {
 
         // Attach event handlers
         $("#model").on('change', () => UIManager.updateModelSettings());
-        $("#gamemode").on('change', () => UIManager.updateConditionalFields());
+        $("#gamemode").on('change', () => {
+            UIManager.updateConditionalFields();
+            DescriptorManager.renderCurrentDescriptors();
+        });
 
         // Initial UI updates
         UIManager.updateModelSettings();

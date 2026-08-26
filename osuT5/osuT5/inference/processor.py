@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import time as _time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-import rosu_pp_py as rosu
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -12,10 +12,11 @@ from slider import Beatmap, TimingPoint
 from tqdm import tqdm
 
 from config import InferenceConfig
-from .server import InferenceClient, model_generate, model_forward
+from .compiled_decode import model_generate_compiled
+from .server import InferenceClient, model_generate, model_forward, precompute_encoder_outputs
 from ..dataset.osu_parser import OsuParser
 from ..dataset.data_utils import (update_event_times, remove_events_of_type, get_hold_note_ratio,
-                                  get_scroll_speed_ratio, get_hitsounded_status)
+                                  get_scroll_speed_ratio, get_hitsounded_status, calculate_difficulty)
 from ..model import Mapperatorinator
 from ..tokenizer import Event, EventType, Tokenizer, ContextType
 
@@ -47,15 +48,7 @@ class GenerationConfig:
 # noinspection PyProtectedMember
 def generation_config_from_beatmap(beatmap: Beatmap, beatmap_path, tokenizer: Optional[Tokenizer] = None) -> GenerationConfig:
     gamemode = int(beatmap.mode)
-
-    difficulty = None
-    try:
-        rosu_map = rosu.Beatmap(path=str(beatmap_path))
-        rosu_diff = rosu.Difficulty()
-        rosu_attrs = rosu_diff.calculate(rosu_map)
-        difficulty = round(rosu_attrs.stars, 2)
-    except Exception as e:
-        print(f"Failed to calculate difficulty for beatmap {beatmap_path}: {e}")
+    difficulty = calculate_difficulty(path=beatmap_path)
 
     return GenerationConfig(
         gamemode=gamemode,
@@ -159,6 +152,11 @@ class Processor(object):
 
         self.timeshift_bias = args.timeshift_bias
         self.types_first = args.train.data.types_first
+        # CUDA-graph fast decoder loop (see compiled_decode.py). Requires CUDA;
+        # inference.py disables it on other devices. When the model is an
+        # InferenceClient this flag lives on the server instead.
+        self.fast_decoder_loop = args.fast_decoder_loop
+        self.last_generation_stats: dict[str, float | int] | None = None
 
     def model_generate(self, model_kwargs, **generate_kwargs: Any) -> Any:
         generate_kwargs2 = generate_kwargs | dict(
@@ -178,9 +176,18 @@ class Processor(object):
         )
 
         if isinstance(self.model, InferenceClient):
-            return self.model.generate(model_kwargs, generate_kwargs2)
-        else:
-            return model_generate(self.model, self.tokenizer, model_kwargs, generate_kwargs2)
+            response = self.model.generate(model_kwargs, generate_kwargs2)
+            return response, getattr(self.model, "last_generation_stats", None)
+        # Batch-1 requests with precomputed encoder outputs go through the fast
+        # decoder loop when enabled (it is captured for a fixed batch size and
+        # cannot do beam search). With an InferenceClient the equivalent dispatch
+        # happens on the server.
+        if (self.fast_decoder_loop
+                and isinstance(model_kwargs.get('encoder_outputs'), torch.Tensor)
+                and model_kwargs['encoder_outputs'].shape[0] == 1
+                and self.num_beams == 1):
+            return model_generate_compiled(self.model, self.tokenizer, model_kwargs, generate_kwargs2)
+        return model_generate(self.model, self.tokenizer, model_kwargs, generate_kwargs2)
 
     def model_forward(self, model_kwargs) -> Any:
         generate_kwargs2 = dict(
@@ -255,6 +262,7 @@ class Processor(object):
         )
 
         generate_func = self.generate_parallel if self.parallel else self.generate_sequential
+        self._reset_generation_stats()
         if isinstance(self.model, InferenceClient):
             with self.model:
                 generate_func(**inputs)
@@ -321,7 +329,51 @@ class Processor(object):
             req_special_tokens: list[str],
             verbose: bool = True,
     ):
+        """Generate windows sequentially, reusing encoder outputs precomputed in a
+        single batched pass before the decode loop. Each window skips the
+        per-window encoder prefill; the encoder is a pure function of the audio
+        window + static conditioning, so hoisting it out of the sequential loop
+        changes only timing, not values.
+        """
         song_length = sequences[2]
+        all_frames = self.prepare_frames(sequences[0])  # (N, L_raw)
+        frame_times = sequences[1]
+        n_windows = all_frames.shape[0]
+
+        # Static conditioning broadcast across windows (beatmap_idx/difficulty/mapper_idx)
+        cond_kwargs = {k: v for k, v in model_kwargs.items()
+                       if k in ("beatmap_idx", "difficulty", "mapper_idx") and isinstance(v, torch.Tensor)}
+
+        # Per-window song positions
+        if self.do_song_position_embed:
+            starts = (frame_times / song_length).to(torch.float32)
+            ends = ((frame_times + self.miliseconds_per_sequence) / song_length).to(torch.float32)
+            song_positions = torch.stack([starts, ends], dim=1)  # (N, 2)
+        else:
+            song_positions = None
+
+        # Precompute encoder outputs for all windows in one batched pass
+        t0 = _time.perf_counter() if verbose else 0
+        if verbose:
+            print(f"Precomputing encoder outputs for {n_windows} windows...")
+        if isinstance(self.model, InferenceClient):
+            # The client doesn't own the model, so the server precomputes.
+            # Conditioning is expanded per window because the server may split
+            # the request into multiple batches.
+            precompute_kwargs = {k: v.expand(n_windows).contiguous() for k, v in cond_kwargs.items()}
+            precompute_kwargs["inputs"] = all_frames
+            if song_positions is not None:
+                precompute_kwargs["song_position"] = song_positions
+            enc_hidden = self.model.precompute_encoder(precompute_kwargs)  # (N, L_enc, D)
+        else:
+            with torch.no_grad():
+                enc_hidden = precompute_encoder_outputs(
+                    self.model, all_frames, cond_kwargs, song_positions,
+                    batch_size=self.max_batch_size,
+                )
+        if verbose:
+            print(f"Encoder precompute: {_time.perf_counter() - t0:.2f}s "
+                  f"({(_time.perf_counter() - t0) / n_windows * 1000:.1f} ms/window)")
 
         for i, context in enumerate(out_context):
             if context["finished"]:
@@ -329,13 +381,11 @@ class Processor(object):
 
             if verbose:
                 print(f"Generating {context['context_type'].value}")
-            iterator = tqdm(list(zip(*sequences[:2]))) if verbose else zip(*sequences[:2])
-            for sequence_index, (frames, frame_time) in enumerate(iterator):
-                trim_lookback = sequence_index != 0 and self.types_first and self.lookback_time > 0
-                trim_lookahead = sequence_index != len(sequences[0]) - 1
-
-                # noinspection PyUnresolvedReferences
-                frames = self.prepare_frames(frames)
+            tokens_per_second_meter = self._create_tokens_per_second_meter()
+            iterator = tqdm(list(zip(range(n_windows), frame_times)), dynamic_ncols=True) if verbose else zip(range(n_windows), frame_times)
+            for sequence_index, (wi, frame_time) in enumerate(iterator):
+                trim_lookback = sequence_index != 0 and self.lookback_time > 0
+                trim_lookahead = sequence_index != n_windows - 1
                 frame_time = frame_time.item()
 
                 # Get relevant tokens for current frame
@@ -346,15 +396,9 @@ class Processor(object):
 
                 [prompt, uncond_prompt], max_len = self.pad_prompts([cond_prompt, uncond_prompt])
 
-                # Prepare additional model kwargs
-                if self.do_song_position_embed:
-                    global_pos_start = frame_time / song_length
-                    global_pos_end = (frame_time + self.miliseconds_per_sequence) / song_length
-                    model_kwargs["song_position"] = torch.tensor([global_pos_start, global_pos_end], dtype=torch.float32).unsqueeze(0)
-
-                result = self.model_generate(
+                result, generation_stats = self.model_generate(
                     model_kwargs | dict(
-                        inputs=frames,
+                        encoder_outputs=enc_hidden[wi:wi + 1],
                         decoder_input_ids=prompt,
                         decoder_attention_mask=prompt.ne(self.tokenizer.pad_id),
                         negative_prompt=uncond_prompt,
@@ -364,6 +408,9 @@ class Processor(object):
                     lookahead_time=self.lookahead_time if trim_lookahead else 0,
                     context_type=context["context_type"].value,
                 )
+                self._record_generation_stats(generation_stats)
+                if verbose:
+                    self._update_tokens_per_second_meter(iterator, tokens_per_second_meter, generation_stats)
 
                 # Only support batch size 1
                 predicted_tokens = result[0, max_len:].cpu()
@@ -402,7 +449,7 @@ class Processor(object):
         )
 
         sequence_index = 0
-        for batch in result:
+        for batch, _ in result:
             for sequence in batch:
                 frame_time = frame_times[sequence_index].item()
                 if self.add_out_context_types:
@@ -478,7 +525,7 @@ class Processor(object):
         )
 
         sequence_index = 0
-        for batch in results:
+        for batch, _ in results:
             for result in batch:
                 for context in out_context_data:
                     trim_lookback = sequence_index != 0
@@ -589,6 +636,7 @@ class Processor(object):
     ):
         in_context = in_context or []
         out_context = out_context or []
+        requested_out_context = out_context.copy()
 
         # Merge extra in context with in context
         if extra_in_context is not None:
@@ -623,8 +671,15 @@ class Processor(object):
                 gen_out_context.remove(ContextType.SV)
 
         # We have to generate the out contexts in order of the template
-        out_context_count = max(all_out_context.index(oc) for oc in gen_out_context) + 1
-        gen_out_context = all_out_context[:out_context_count]
+        requested_out_context_was_explicit = len(requested_out_context) > 0
+        requested_out_context = [oc for oc in requested_out_context if oc in gen_out_context]
+        if len(requested_out_context) == 0:
+            if requested_out_context_was_explicit:
+                raise ValueError("No requested output contexts are available for the selected template and gamemode.")
+            gen_out_context = all_out_context.copy()
+        else:
+            out_context_count = max(all_out_context.index(oc) for oc in requested_out_context) + 1
+            gen_out_context = all_out_context[:out_context_count]
 
         return gen_in_context, gen_out_context, req_special_tokens
 
@@ -705,8 +760,8 @@ class Processor(object):
         model_kwarg_keys = list(model_kwargses[0].keys())
 
         # Process each batch
-        iterator = tqdm(list(range(0, num_samples, max_batch_size))) if verbose else range(0, num_samples,
-                                                                                           max_batch_size)
+        tokens_per_second_meter = self._create_tokens_per_second_meter()
+        iterator = tqdm(list(range(0, num_samples, max_batch_size)), dynamic_ncols=True) if verbose else range(0, num_samples, max_batch_size)
         for i in iterator:
             frames_batch = frames[i:i + max_batch_size]
             cond_prompt_batch = cond_prompt[i:i + max_batch_size]
@@ -727,7 +782,15 @@ class Processor(object):
                 ),
             )
 
-            yield result
+            generation_stats = None
+            if isinstance(result, tuple) and len(result) == 2:
+                result, generation_stats = result
+
+            self._record_generation_stats(generation_stats)
+            if verbose:
+                self._update_tokens_per_second_meter(iterator, tokens_per_second_meter, generation_stats)
+
+            yield result, generation_stats
 
         torch.cuda.empty_cache()
 
@@ -889,6 +952,9 @@ class Processor(object):
     ) -> list[dict[str, Any]]:
         out = []
         for i, context in enumerate(out_context):
+            context_is_provided = context in given_context or (
+                extra_in_context is not None and context in extra_in_context
+            )
             context_data = self.get_context(
                 context,
                 beatmap_path=beatmap_path,
@@ -896,7 +962,7 @@ class Processor(object):
                 song_length=song_length,
                 add_type=self.add_out_context_types,
                 add_class=False,
-                finished=context in given_context,
+                finished=context_is_provided,
                 partial=self.add_to_beatmap and self.start_time is not None,
             )
 
@@ -1234,7 +1300,17 @@ class Processor(object):
                 continue
 
             if event.type == EventType.TIME_SHIFT:
-                event.value = frame_time + event.value * MILISECONDS_PER_STEP
+                # Half-step (+5ms) de-biasing. Time shifts are encoded to the 10ms
+                # token grid by truncation (int((ms - start) * STEPS_PER_MILLISECOND)
+                # in data_utils / _encode), so a decoded step represents the floor
+                # of the true time. Multiplying straight back biases every event
+                # ~5ms early (measured mean -4.82ms, median -5.0ms over 50k time
+                # shifts from ranked maps). Adding half a step recenters the
+                # quantization error to ~0 (mean -4.82 -> +0.18ms). This is
+                # self-consistent with _encode's truncation on context round-trips:
+                # the +5 is truncated back to the same step.
+                half_step = MILISECONDS_PER_STEP // 2 if event.value >= 0 else 0
+                event.value = frame_time + event.value * MILISECONDS_PER_STEP + half_step
 
             events.append(event)
 
@@ -1303,3 +1379,44 @@ class Processor(object):
                 new_events.append(event)
                 new_event_times.append(event_times[i])
         return new_events, new_event_times
+
+    def _reset_generation_stats(self) -> None:
+        self.last_generation_stats = {
+            "generated_tokens": 0,
+            "elapsed_seconds": 0.0,
+            "tokens_per_second": 0.0,
+        }
+
+    def _record_generation_stats(self, stats: Any) -> None:
+        if not isinstance(stats, dict):
+            return
+
+        if self.last_generation_stats is None:
+            self._reset_generation_stats()
+
+        generated_tokens = int(stats.get("generated_tokens", 0) or 0)
+        elapsed_seconds = float(stats.get("elapsed_seconds", 0.0) or 0.0)
+        self.last_generation_stats["generated_tokens"] += generated_tokens
+        self.last_generation_stats["elapsed_seconds"] += elapsed_seconds
+
+        total_elapsed = float(self.last_generation_stats["elapsed_seconds"])
+        total_tokens = int(self.last_generation_stats["generated_tokens"])
+        self.last_generation_stats["tokens_per_second"] = total_tokens / total_elapsed if total_elapsed > 0 else 0.0
+
+    @staticmethod
+    def _create_tokens_per_second_meter(alpha: float = 0.1) -> dict[str, float | None]:
+        return {"alpha": alpha, "ema": None}
+
+    @staticmethod
+    def _update_tokens_per_second_meter(progress_bar, meter: dict[str, float | None], stats: Any) -> None:
+        if progress_bar is None or not isinstance(stats, dict):
+            return
+
+        tokens_per_second = stats.get("tokens_per_second")
+        if tokens_per_second is None or tokens_per_second <= 0:
+            return
+
+        previous = meter.get("ema")
+        alpha = float(meter.get("alpha", 0.1))
+        meter["ema"] = float(tokens_per_second) if previous is None else (alpha * float(tokens_per_second) + (1 - alpha) * float(previous))
+        progress_bar.set_postfix_str(f"{meter['ema']:.1f} tok/s", refresh=False)

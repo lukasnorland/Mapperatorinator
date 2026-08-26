@@ -9,6 +9,7 @@ from typing import Optional
 import hydra
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 from scipy import linalg
 from slider import Beatmap, Circle, Slider, Spinner, HoldNote
@@ -32,6 +33,8 @@ import multiprocessing
 from logging.handlers import QueueHandler, QueueListener
 
 logger = logging.getLogger(__name__)
+
+CM3P_SSM_SIMILARITY = "cosine"
 
 
 # --- Extra metrics helpers (Drain/BPM/SR) ---
@@ -153,6 +156,80 @@ def _sr_stars(beatmap_path: Path) -> Optional[float]:
     return attrs.stars
 
 
+def _compute_self_similarity(features: np.ndarray, similarity: str = CM3P_SSM_SIMILARITY) -> np.ndarray:
+    if features.ndim != 2:
+        raise ValueError(f"Expected 2D CM3P features, got shape {features.shape}")
+
+    if similarity == "dot":
+        return features @ features.T
+
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    norms = np.clip(norms, a_min=1e-12, a_max=None)
+    normalized = features / norms
+    return normalized @ normalized.T
+
+
+def _normalize_similarity_matrix_for_display(
+        matrix: np.ndarray,
+        similarity: str = CM3P_SSM_SIMILARITY,
+        min_value: float | None = None,
+        max_value: float | None = None,
+) -> np.ndarray:
+    if similarity == "cosine":
+        return np.clip((matrix + 1.0) / 2.0, 0.0, 1.0).astype(np.float32, copy=False)
+
+    if min_value is None:
+        min_value = float(np.min(matrix))
+    if max_value is None:
+        max_value = float(np.max(matrix))
+
+    if max_value - min_value < 1e-12:
+        return np.zeros_like(matrix, dtype=np.float32)
+
+    return np.clip((matrix - min_value) / (max_value - min_value), 0.0, 1.0).astype(np.float32)
+
+
+def _resize_similarity_matrix(matrix: np.ndarray, target_size: int) -> np.ndarray:
+    if matrix.shape == (target_size, target_size):
+        return matrix.astype(np.float32, copy=False)
+
+    matrix_tensor = torch.from_numpy(matrix.astype(np.float32, copy=False)).unsqueeze(0).unsqueeze(0)
+    resized = F.interpolate(matrix_tensor, size=(target_size, target_size), mode="bilinear", align_corners=False)
+    return resized.squeeze(0).squeeze(0).numpy()
+
+
+def _ssm_rmse_for_pair(
+        real_features: Optional[np.ndarray],
+        generated_features: Optional[np.ndarray],
+        similarity: str = CM3P_SSM_SIMILARITY,
+) -> Optional[float]:
+    if real_features is None or generated_features is None:
+        return None
+
+    if real_features.size == 0 or generated_features.size == 0:
+        return None
+
+    matrix_real = _compute_self_similarity(real_features, similarity)
+    matrix_generated = _compute_self_similarity(generated_features, similarity)
+
+    if similarity == "dot":
+        shared_min = float(min(np.min(matrix_real), np.min(matrix_generated)))
+        shared_max = float(max(np.max(matrix_real), np.max(matrix_generated)))
+        display_real = _normalize_similarity_matrix_for_display(matrix_real, similarity, shared_min, shared_max)
+        display_generated = _normalize_similarity_matrix_for_display(
+            matrix_generated, similarity, shared_min, shared_max,
+        )
+    else:
+        display_real = _normalize_similarity_matrix_for_display(matrix_real, similarity)
+        display_generated = _normalize_similarity_matrix_for_display(matrix_generated, similarity)
+
+    target_size = max(display_real.shape[0], display_generated.shape[0])
+    resized_real = _resize_similarity_matrix(display_real, target_size)
+    resized_generated = _resize_similarity_matrix(display_generated, target_size)
+
+    return float(np.sqrt(np.mean((resized_real - resized_generated) ** 2)))
+
+
 def _configure_generation_log_parent(log_file: Path) -> tuple[QueueListener, multiprocessing.Queue]:
     """Configure a QueueListener in the parent process that writes generation logs to a file."""
     log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -198,6 +275,16 @@ def _configure_generation_log_worker(queue: multiprocessing.Queue) -> logging.Lo
     return gen_logger
 
 
+def _read_gamemode_from_osu(path: Path) -> int:
+    """Read the Mode field from an .osu file without fully parsing it."""
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("Mode:"):
+                return int(stripped.split(":")[1].strip())
+    return 0  # default to std
+
+
 def get_beatmap_paths(args: FidConfig) -> list[Path]:
     """Get all beatmap paths (.osu) from the dataset directory."""
     dataset_path = Path(args.dataset_path)
@@ -222,6 +309,49 @@ def get_beatmap_paths(args: FidConfig) -> list[Path]:
         raise ValueError(f"Unknown dataset type: {args.dataset_type}")
 
     return beatmap_files
+
+
+def get_beatmap_paths_by_gamemode(args: FidConfig) -> dict[int, list[Path]]:
+    """Get beatmap paths grouped by gamemode.
+
+    For mmrs datasets the gamemode comes from the metadata.
+    For ors datasets the Mode field is read from each .osu file.
+
+    Returns:
+        Dictionary mapping gamemode (int) to the list of beatmap paths for that mode.
+    """
+    dataset_path = Path(args.dataset_path)
+    paths_by_gm: dict[int, list[Path]] = {}
+
+    if args.dataset_type == "mmrs":
+        metadata = load_mmrs_metadata(dataset_path)
+        filtered_metadata = filter_mmrs_metadata(
+            metadata,
+            start=args.dataset_start,
+            end=args.dataset_end,
+            gamemodes=args.gamemodes,
+            min_year=args.min_year,
+            max_year=args.max_year,
+            min_difficulty=args.min_difficulty,
+            max_difficulty=args.max_difficulty,
+        )
+        for _, item in filtered_metadata.iterrows():
+            gm = int(item["ModeInt"])
+            path = dataset_path / "data" / item["BeatmapSetFolder"] / item["BeatmapFile"]
+            paths_by_gm.setdefault(gm, []).append(path)
+    elif args.dataset_type == "ors":
+        track_names = ["Track" + str(i).zfill(5) for i in range(args.dataset_start, args.dataset_end)]
+        for track_name in track_names:
+            for beatmap_file in (dataset_path / track_name / "beatmaps").iterdir():
+                path = dataset_path / track_name / "beatmaps" / beatmap_file.name
+                gm = _read_gamemode_from_osu(path)
+                if gm in args.gamemodes:
+                    paths_by_gm.setdefault(gm, []).append(path)
+    else:
+        raise ValueError(f"Unknown dataset type: {args.dataset_type}")
+
+    # Sort keys so generation order is deterministic (0, 1, 2, 3)
+    return dict(sorted(paths_by_gm.items()))
 
 
 def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
@@ -370,15 +500,11 @@ def generate_beatmaps(beatmap_paths, args: InferenceConfig, dataset_type, idx, l
     gen_logger = _configure_generation_log_worker(log_queue)
 
     model, tokenizer, diff_model, diff_tokenizer, refine_model = None, None, None, None, None
-    model, tokenizer = load_model_with_server(
-        args.model_path,
-        args.train,
-        args.device,
-        max_batch_size=args.max_batch_size,
-        use_server=args.use_server,
-        precision=args.precision,
-        attn_implementation=args.attn_implementation,
-    )
+    model, tokenizer = load_model_with_server(args.model_path, args.train, args.device,
+                                              max_batch_size=args.max_batch_size, use_server=args.use_server,
+                                              precision=args.precision, attn_implementation=args.attn_implementation,
+                                              gamemode=args.gamemode,
+                                              auto_select_gamemode_model=args.auto_select_gamemode_model)
 
     if args.compile:
         model.transformer.forward = torch.compile(model.transformer.forward, mode="reduce-overhead", fullgraph=True)
@@ -484,6 +610,9 @@ def calculate_metrics(args: FidConfig, beatmap_paths: list[Path]):
     sr_se_sum = 0.0
     sr_n = 0
 
+    ssm_rmse_se_sum = 0.0
+    ssm_rmse_n = 0
+
     for beatmap_path in tqdm(beatmap_paths, desc=f"Metrics"):
         try:
             beatmap = Beatmap.from_path(beatmap_path)
@@ -524,13 +653,26 @@ def calculate_metrics(args: FidConfig, beatmap_paths: list[Path]):
                     # Turn dict of tensors into list of dicts of tensors for DataLoader
                     beatmap_data = [{key: beatmap_data[key][i] for key in beatmap_data} for i in
                                     range(len(beatmap_data['input_ids']))]
+                    beatmap_features = []
                     for example in DataLoader(beatmap_data, batch_size=args.cm3p_batch_size):
                         outputs = cm3p_model(**example, return_loss=False)
                         beatmap_embeds = outputs.beatmap_embeds
-                        feature_list.append(beatmap_embeds.float().cpu().numpy())
+                        batch_features = beatmap_embeds.float().cpu().numpy()
+                        feature_list.append(batch_features)
+                        beatmap_features.append(batch_features)
 
-                process(beatmap, real_features_cm3p)
-                process(generated_beatmap, generated_features_cm3p)
+                    if not beatmap_features:
+                        return None
+                    return np.concatenate(beatmap_features, axis=0)
+
+                real_cm3p_features = process(beatmap, real_features_cm3p)
+                generated_cm3p_features = process(generated_beatmap, generated_features_cm3p)
+
+                if args.extra_stats:
+                    ssm_rmse = _ssm_rmse_for_pair(real_cm3p_features, generated_cm3p_features)
+                    if ssm_rmse is not None:
+                        ssm_rmse_se_sum += ssm_rmse * ssm_rmse
+                        ssm_rmse_n += 1
 
             if args.rhythm_stats:
                 # Calculate rhythm stats
@@ -609,6 +751,9 @@ def calculate_metrics(args: FidConfig, beatmap_paths: list[Path]):
         if sr_n > 0:
             logger.info(f"SR RMSE: {np.sqrt(sr_se_sum / sr_n)}")
 
+        if ssm_rmse_n > 0:
+            logger.info(f"SSM RMSE: {np.sqrt(ssm_rmse_se_sum / ssm_rmse_n)}")
+
 
 def test_training_set_overlap(beatmap_paths: list[Path], training_set_ids_path: Optional[str]):
     if training_set_ids_path is None:
@@ -643,12 +788,16 @@ def main(args: FidConfig):
     print(f"Logging to directory: {os.getcwd()}")
 
     # Fix inference model path
-    if args.inference.model_path.startswith("./"):
-        args.inference.model_path = os.path.join(Path(__file__).parent, args.inference.model_path[2:])
+    base_model_path = args.inference.model_path
+    if base_model_path.startswith("./"):
+        base_model_path = os.path.join(Path(__file__).parent, base_model_path[2:])
+    args.inference.model_path = base_model_path
 
-    beatmap_paths = get_beatmap_paths(args)
+    # Group beatmaps by gamemode so each stage uses the correct checkpoint
+    paths_by_gm = get_beatmap_paths_by_gamemode(args)
+    all_beatmap_paths = [p for gm_paths in paths_by_gm.values() for p in gm_paths]
 
-    test_training_set_overlap(beatmap_paths, args.training_set_ids_path)
+    test_training_set_overlap(all_beatmap_paths, args.training_set_ids_path)
 
     listener = None
     try:
@@ -656,25 +805,37 @@ def main(args: FidConfig):
         listener, log_queue = _configure_generation_log_parent(Path(os.getcwd()) / "generation.log")
 
         if not args.skip_generation:
-            # Assign beatmaps to processes in a round-robin fashion
-            num_processes = max(args.num_processes, 1)
-            chunks = [[] for _ in range(num_processes)]
-            for i, path in enumerate(beatmap_paths):
-                chunks[i % num_processes].append(path)
+            gamemode_names = {0: "std", 1: "taiko", 2: "catch", 3: "mania"}
+            for gm, gm_beatmap_paths in paths_by_gm.items():
+                gm_name = gamemode_names.get(gm, f"gamemode {gm}")
+                logger.info(
+                    "=== Generating %s beatmaps (%d maps) with base checkpoint %s ===",
+                    gm_name, len(gm_beatmap_paths), base_model_path,
+                )
 
-            if args.num_processes <= 0:
-                generate_beatmaps(chunks[0], args.inference, args.dataset_type, 0, log_queue=log_queue)
-            else:
-                processes = []
-                for i in range(num_processes):
-                    p = Process(target=generate_beatmaps, args=(chunks[i], args.inference, args.dataset_type, i, log_queue))
-                    processes.append(p)
-                    p.start()
+                args.inference.gamemode = gm
 
-                for p in processes:
-                    p.join()
+                # Assign beatmaps to processes in a round-robin fashion
+                num_processes = max(args.num_processes, 1)
+                chunks = [[] for _ in range(num_processes)]
+                for i, path in enumerate(gm_beatmap_paths):
+                    chunks[i % num_processes].append(path)
 
-        calculate_metrics(args, beatmap_paths)
+                if args.num_processes <= 0:
+                    generate_beatmaps(chunks[0], args.inference, args.dataset_type, 0, log_queue=log_queue)
+                else:
+                    processes = []
+                    for i in range(num_processes):
+                        p = Process(target=generate_beatmaps, args=(chunks[i], args.inference, args.dataset_type, i, log_queue))
+                        processes.append(p)
+                        p.start()
+
+                    for p in processes:
+                        p.join()
+
+                logger.info("=== Finished generating %s beatmaps ===", gm_name)
+
+        calculate_metrics(args, all_beatmap_paths)
     finally:
         if listener is not None:
             listener.stop()

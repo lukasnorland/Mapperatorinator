@@ -1,11 +1,14 @@
+import multiprocessing
 import traceback
+import atexit
 from dataclasses import asdict
 from pathlib import Path
+import json
 
 from hydra import initialize_config_dir, compose
 from omegaconf import OmegaConf
 
-import excepthook  # noqa
+import utils.excepthook  # noqa
 import functools
 import os
 import platform
@@ -17,28 +20,90 @@ import uuid
 from typing import Callable, Any, Tuple, Dict
 
 import io
+import hmac
 import multiprocessing as mp
 import queue as queue_mod
 import datetime
+import secrets
 import time
 
 import webview
 import werkzeug.serving
 from flask import Flask, render_template, request, Response, jsonify
 
-import routed_pickle
+from utils import routed_pickle
 from config import InferenceConfig
 from osuT5.osuT5.event import ContextType
 from osuT5.osuT5.inference.server import InferenceClient
 from osuT5.osuT5.utils import load_model_loaders
-from inference import compile_args, get_server_address, main
+from inference import compile_args, get_server_address, main, should_load_separate_timing_model
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 template_folder = os.path.join(script_dir, 'template')
 static_folder = os.path.join(script_dir, 'static')
+descriptor_dataset_paths = {
+    'omdb': Path(script_dir) / 'datasets' / 'omdb_descriptors.json',
+    'user_tags': Path(script_dir) / 'datasets' / 'tags_2026.json',
+}
 
 if not os.path.isdir(static_folder):
     print(f"Warning: Static folder not found at {static_folder}. Ensure it exists and contains your CSS/images.")
+
+
+def format_descriptor_group_title(group_key: str) -> str:
+    return ' '.join(part.capitalize() for part in group_key.replace('_', ' ').split())
+
+
+def load_descriptor_set(dataset_path: Path, set_name: str) -> dict:
+    if not dataset_path.is_file():
+        print(f"Warning: Descriptor dataset not found at {dataset_path}.")
+        return {'groups': []}
+
+    with dataset_path.open('r', encoding='utf-8') as f:
+        tag_data = json.load(f)
+
+    groups = []
+    groups_by_key = {}
+
+    for tag in tag_data.get('tags', []):
+        full_name = (tag.get('name') or '').strip()
+        if not full_name:
+            continue
+
+        if '/' in full_name:
+            group_key, descriptor_name = full_name.split('/', 1)
+        else:
+            group_key, descriptor_name = 'other', full_name
+
+        group = groups_by_key.get(group_key)
+        if group is None:
+            group = {
+                'key': group_key,
+                'title': format_descriptor_group_title(group_key),
+                'items': [],
+            }
+            groups_by_key[group_key] = group
+            groups.append(group)
+
+        descriptor_value = (tag.get('value') or full_name).strip()
+        if not descriptor_value:
+            continue
+
+        group['items'].append({
+            'value': descriptor_value,
+            'label': descriptor_name,
+            'title': tag.get('description') or '',
+            'rulesetId': tag.get('ruleset_id'),
+            'translationKey': tag.get('translation_key') or (f"tag_{tag['id']}" if set_name == 'user_tags' else descriptor_value),
+        })
+
+    return {'groups': groups}
+
+
+DESCRIPTOR_SETS = {
+    set_name: load_descriptor_set(dataset_path, set_name)
+    for set_name, dataset_path in descriptor_dataset_paths.items()
+}
 
 
 # Set Flask environment to production before initializing Flask app to silence warning
@@ -81,11 +146,64 @@ def parse_file_dialog_result(result):
 
 app = Flask(__name__, template_folder=template_folder, static_folder=static_folder)
 app.secret_key = os.urandom(24)  # Set a secret key for Flask
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',
+)
+
+CSRF_HEADER_NAME = 'X-Mapperatorinator-CSRF-Token'
+LOCAL_UI_CSRF_TOKEN = secrets.token_urlsafe(32)
+CSRF_PROTECTED_ENDPOINTS = {
+    'start_inference',
+    'cancel_inference',
+    'save_config',
+    'validate_paths',
+    'open_folder',
+    'open_log_file',
+}
+
+
+def _is_authorized_ui_request() -> bool:
+    token = request.headers.get(CSRF_HEADER_NAME, '')
+    return bool(token) and hmac.compare_digest(token, LOCAL_UI_CSRF_TOKEN)
+
+
+@app.before_request
+def _protect_local_ui_endpoints():
+    if request.endpoint not in CSRF_PROTECTED_ENDPOINTS:
+        return None
+
+    if request.method != 'POST':
+        return jsonify({
+            "status": "error",
+            "message": "This endpoint only accepts authenticated POST requests."
+        }), 405
+
+    if not _is_authorized_ui_request():
+        return jsonify({
+            "status": "error",
+            "message": "Missing or invalid CSRF token. Refresh the UI and try again."
+        }), 403
+
+    return None
 
 
 # --- pywebview API Class ---
 class Api:
     # No __init__ needed as we get the window dynamically
+    def set_window_title(self, title):
+        """Updates the native pywebview window title."""
+        if not webview.windows:
+            print("Error: No pywebview window found.")
+            return False
+
+        try:
+            webview.windows[0].set_title(title)
+            return True
+        except Exception:
+            traceback.print_exc()
+            return False
+
     def save_file(self, filename):
         """Opens a save file dialog and returns the selected file path."""
         # Get the window dynamically from the global list
@@ -170,28 +288,125 @@ class Api:
 processes = {}
 cancelled_jobs = set()
 process_lock = threading.Lock()
+owned_server_clients = {}
+owned_server_clients_lock = threading.Lock()
+shutdown_lock = threading.Lock()
+shutdown_started = False
 
 
-def _ensure_inference_server(args):
+def _ensure_model_server(args, *, auto_select_gamemode_model: bool, lora_path: str | None):
+    socket_path = get_server_address(
+        args.model_path,
+        lora_path=lora_path,
+        gamemode=args.gamemode,
+        auto_select_gamemode_model=auto_select_gamemode_model,
+    )
+
+    with owned_server_clients_lock:
+        existing_client = owned_server_clients.get(socket_path)
+
+    if existing_client is not None:
+        existing_client.ensure_server()
+        return
+
     model_loader, tokenizer_loader = load_model_loaders(
-        ckpt_path_str=args.model_path,
+        ckpt_path=args.model_path,
         t5_args=args.train,
         device=args.device,
         precision=args.precision,
         attn_implementation=args.attn_implementation,
         eval_mode=True,
         pickle_module=routed_pickle,
-        lora_path=args.lora_path,
+        lora_path=lora_path,
+        gamemode=args.gamemode,
+        auto_select_gamemode_model=auto_select_gamemode_model,
     )
     _server_owner_client = InferenceClient(
         model_loader,
         tokenizer_loader,
         max_batch_size=args.max_batch_size,
-        socket_path=get_server_address(args.model_path),
+        idle_timeout=3600,
+        server_thread_daemon=True,
+        socket_path=socket_path,
+        fast_decoder_loop=args.fast_decoder_loop,
     )
 
     # Start the server in a dedicated thread that outlives per-job workers.
     _server_owner_client.ensure_server()
+
+    with owned_server_clients_lock:
+        owned_server_clients.setdefault(socket_path, _server_owner_client)
+
+
+def _ensure_inference_server(args):
+    _ensure_model_server(
+        args,
+        auto_select_gamemode_model=args.auto_select_gamemode_model,
+        lora_path=args.lora_path
+    )
+
+    if should_load_separate_timing_model(args):
+        _ensure_model_server(args, auto_select_gamemode_model=False, lora_path=None)
+
+
+def _shutdown_inference_processes():
+    with process_lock:
+        active_processes = list(processes.items())
+        processes.clear()
+        cancelled_jobs.update(job_id for job_id, _ in active_processes)
+
+    for _, rec in active_processes:
+        proc = rec.get("process")
+        q = rec.get("queue")
+
+        if proc is not None:
+            try:
+                if proc.is_alive():
+                    if sys.platform == 'win32':
+                        subprocess.run(['taskkill', '/F', '/T', '/PID', str(proc.pid)], capture_output=True, timeout=5)
+                    else:
+                        proc.terminate()
+            except Exception:
+                pass
+
+            try:
+                proc.join(timeout=5)
+            except Exception:
+                pass
+
+        if q is not None:
+            try:
+                q.cancel_join_thread()
+            except Exception:
+                pass
+            try:
+                q.close()
+            except Exception:
+                pass
+
+
+def _shutdown_owned_model_servers():
+    with owned_server_clients_lock:
+        server_clients = list(owned_server_clients.values())
+        owned_server_clients.clear()
+
+    for client in server_clients:
+        try:
+            client.shutdown_server()
+        except Exception:
+            traceback.print_exc()
+
+
+def _shutdown_application_resources():
+    global shutdown_started
+
+    with shutdown_lock:
+        if shutdown_started:
+            return
+        shutdown_started = True
+
+    _shutdown_inference_processes()
+    _shutdown_owned_model_servers()
 
 
 def _coerce_optional_int(v):
@@ -208,6 +423,19 @@ def _coerce_optional_float(v):
 
 def _coerce_bool_checkbox(form, key: str) -> bool:
     return key in form
+
+
+def _validate_year_for_model(model_name: str | None, year: int | None) -> None:
+    if year is None:
+        return
+
+    min_year = 2007
+    max_year = 2024 if model_name == 'v32' else 2023
+
+    if year < min_year or year > max_year:
+        raise ValueError(
+            f"Year must be between {min_year} and {max_year} for model '{model_name or 'unknown'}'."
+        )
 
 
 class _QueueWriter(io.TextIOBase):
@@ -270,7 +498,12 @@ def _inference_worker(cfg: InferenceConfig, out_q: mp.Queue):
 def index():
     """Renders the main HTML page."""
     # Jinja rendering is now handled by Flask's render_template
-    return render_template('index.html')
+    return render_template(
+        'index.html',
+        csrf_token=LOCAL_UI_CSRF_TOKEN,
+        csrf_header_name=CSRF_HEADER_NAME,
+        descriptor_sets=DESCRIPTOR_SETS,
+    )
 
 
 @app.route('/check_bf16_support', methods=['GET'])
@@ -322,6 +555,10 @@ def start_inference():
     cfg.gamemode = _coerce_optional_int(request.form.get('gamemode')) or 0
     cfg.difficulty = _coerce_optional_float(request.form.get('difficulty'))
     cfg.year = _coerce_optional_int(request.form.get('year'))
+    try:
+        _validate_year_for_model(config_name, cfg.year)
+    except ValueError as ve:
+        return jsonify({"status": "error", "message": str(ve)}), 400
 
     # Numeric settings
     cfg.hp_drain_rate = _coerce_optional_float(request.form.get('hp_drain_rate'))
@@ -369,6 +606,8 @@ def start_inference():
     # Precision
     if _coerce_bool_checkbox(request.form, 'enable_bf16'):
         cfg.precision = 'bf16'
+    else:
+        cfg.precision = 'fp32'
 
     # Descriptor lists
     descriptors = request.form.getlist('descriptors')
@@ -495,6 +734,22 @@ def stream_output():
                 processes.pop(job_id, None)
                 cancelled_jobs.discard(job_id)
 
+            try:
+                if proc is not None:
+                    proc.join(timeout=1)
+            except Exception:
+                pass
+
+            try:
+                q.cancel_join_thread()
+            except Exception:
+                pass
+
+            try:
+                q.close()
+            except Exception:
+                pass
+
     return Response(generate(), mimetype='text/event-stream')
 
 
@@ -525,10 +780,10 @@ def cancel_inference():
     return jsonify({"status": "success", "message": "Process already finished"}), 200
 
 
-@app.route('/open_folder', methods=['GET'])
+@app.route('/open_folder', methods=['POST'])
 def open_folder():
     """Opens a folder in the file explorer."""
-    folder_path = request.args.get('folder')
+    folder_path = request.form.get('folder')
     print(f"Request received to open folder: {folder_path}")
     if not folder_path:
         return jsonify({"status": "error", "message": "No folder path specified"}), 400
@@ -563,10 +818,10 @@ def open_folder():
         return jsonify({"status": "error", "message": f"Could not open folder: {e}"}), 500
 
 
-@app.route('/open_log_file', methods=['GET'])
+@app.route('/open_log_file', methods=['POST'])
 def open_log_file():
     """Opens a specific log file."""
-    log_path = request.args.get('path')
+    log_path = request.form.get('path')
     print(f"Request received to open log file: {log_path}")
     if not log_path:
         return jsonify({"status": "error", "message": "No log file path specified"}), 400
@@ -702,8 +957,49 @@ def find_available_port(start_port=5000, max_tries=100):
     raise IOError("Could not find an available port.")
 
 
+def launch_browser_fallback(flask_url, flask_thread):
+    """Keep the server alive when an embedded window cannot be created."""
+    print(f"Running without an embedded window. Open {flask_url} in your browser.")
+    print("Press Ctrl+C to stop the server.")
+
+    try:
+        while flask_thread.is_alive():
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nStopping server...")
+    finally:
+        _shutdown_application_resources()
+
+
+def launch_webview_window(window_title, flask_url, window_width, window_height, api):
+    """Create the embedded pywebview window when a GUI backend is available."""
+    print(f"Creating pywebview window loading URL: {flask_url}")
+    try:
+        webview.create_window(
+            window_title,
+            url=flask_url,
+            width=window_width,
+            height=window_height,
+            resizable=True,
+            js_api=api,
+        )
+        webview.start()
+        print("Pywebview window closed. Shutting down application resources...")
+        _shutdown_application_resources()
+        print("Application shutdown complete. Exiting.")
+        return True
+    except Exception as e:
+        print(f"pywebview could not start an embedded window: {e}")
+        print(traceback.format_exc())
+        return False
+
+
 # --- Main Execution ---
 if __name__ == '__main__':
+    # Use spawn instead of fork to avoid issues with CUDA on Linux
+    multiprocessing.set_start_method('spawn', force=True)
+    atexit.register(_shutdown_application_resources)
+
     # Find an available port for Flask
     flask_port = find_available_port()
 
@@ -734,23 +1030,8 @@ if __name__ == '__main__':
     window_title = 'Mapperatorinator'
     flask_url = f'http://127.0.0.1:{flask_port}/'
 
-    print(f"Creating pywebview window loading URL: {flask_url}")
-
     # Instantiate the API class (doesn't need window object anymore)
     api = Api()
 
-    # Pass api instance directly to create_window via js_api
-    window = webview.create_window(
-        window_title,
-        url=flask_url,
-        width=window_width,  # Use calculated width
-        height=window_height,  # Use calculated height
-        resizable=True,
-        js_api=api  # Expose Python API class here
-    )
-
-    # Start the pywebview event loop (no args needed here now)
-    webview.start()
-
-    print("Pywebview window closed. Exiting application.")
-    # Flask thread will exit automatically as it's a daemon
+    if not launch_webview_window(window_title, flask_url, window_width, window_height, api):
+        launch_browser_fallback(flask_url, flask_thread)

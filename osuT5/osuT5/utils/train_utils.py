@@ -1,8 +1,12 @@
 import glob
 import os.path
+import shutil
+import subprocess
 import time
 from multiprocessing.managers import Namespace
+from pathlib import Path
 
+import datasets
 import numpy as np
 import torch
 import wandb
@@ -17,9 +21,49 @@ from ..dataset.ors_dataset import LABEL_IGNORE_ID
 from ..tokenizer import Tokenizer, EventType, ContextType
 from ..model import Mapperatorinator
 from .log_utils import Averager
+from .model_utils import save_lora_checkpoint_metadata
 from ..config import TrainConfig
 
 logger = get_logger(__name__)
+
+
+def maybe_cleanup_wandb_cache(args: TrainConfig):
+    if not args.checkpoint.cleanup_wandb_cache_before_save:
+        return
+
+    if args.logging.log_with != "wandb":
+        return
+
+    wandb_executable = shutil.which("wandb")
+    if wandb_executable is None:
+        logger.warning("Skipping W&B cache cleanup because the wandb CLI is not available.")
+        return
+
+    result = subprocess.run(
+        [
+            wandb_executable,
+            "artifact",
+            "cache",
+            "cleanup",
+            "--remove-temp",
+            args.checkpoint.wandb_cache_cleanup_size,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        logger.warning(
+            "W&B cache cleanup failed with exit code %s: %s",
+            result.returncode,
+            result.stderr.strip() or result.stdout.strip(),
+        )
+        return
+
+    cleanup_output = result.stdout.strip()
+    if cleanup_output:
+        logger.info("W&B cache cleanup: %s", cleanup_output)
 
 
 def forward(model: Mapperatorinator, batch):
@@ -57,13 +101,16 @@ def maybe_save_checkpoint(model, accelerator: Accelerator, args: TrainConfig, sh
         else:
             is_best = False
 
-        output_dir = f"checkpoint-{shared.current_train_step}"
+        maybe_cleanup_wandb_cache(args)
+
         # Saving T5 has an issue that safe serialization removes shared tensors and then the model can't be loaded.
-        accelerator.save_state(output_dir=output_dir, safe_serialization=False)
+        output_dir = Path(accelerator.save_state(output_dir=None, safe_serialization=False))
 
         if args.enable_lora:
             unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(os.path.join(output_dir, "lora"))
+            lora_output_dir = output_dir / "lora"
+            unwrapped_model.save_pretrained(lora_output_dir)
+            save_lora_checkpoint_metadata(lora_output_dir, args)
 
         try:
             wandb_tracker = accelerator.get_tracker("wandb")
@@ -85,7 +132,7 @@ def maybe_save_checkpoint(model, accelerator: Accelerator, args: TrainConfig, sh
                     "spectrogram": args.model.spectrogram,
                     "current_train_step": shared.current_train_step,
                     "current_epoch": shared.current_epoch,
-                    "current_loss": shared.current_loss,
+                    "current_loss": shared.current_loss if np.isfinite(shared.current_loss) else None,
                 },
             )
 
@@ -93,7 +140,7 @@ def maybe_save_checkpoint(model, accelerator: Accelerator, args: TrainConfig, sh
             for root, _, files in os.walk(output_dir):
                 for file in files:
                     file_path = os.path.join(root, file)
-                    artifact_path = os.path.relpath(file_path, output_dir)
+                    artifact_path = os.path.relpath(file_path, str(output_dir))
                     art.add_file(file_path, artifact_path)
 
             wandb.log_artifact(art, aliases=["best"] if is_best else None)

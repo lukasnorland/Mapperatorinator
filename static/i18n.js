@@ -11,7 +11,7 @@
  *   4. Use I18n.t('key.path') to get translated strings in JavaScript
  */
 
-const I18n = (function() {
+const I18n = (function () {
     'use strict';
 
     // Private variables
@@ -20,7 +20,13 @@ const I18n = (function() {
     let fallbackTranslations = {};
     const STORAGE_KEY = 'mapperatorinator_language';
     const DEFAULT_LANGUAGE = 'en';
-    const SUPPORTED_LANGUAGES = ['en', 'zh-CN'];
+    const SUPPORTED_LANGUAGES = [
+        { code: 'en', name: 'English' },
+        { code: 'ru', name: 'Русский' },
+        { code: 'zh-CN', name: '简体中文' },
+        { code: 'bpd_catgirl', name: 'BPD Catgirl' }
+    ];
+    const SUPPORTED_LANGUAGE_CODES = SUPPORTED_LANGUAGES.map(lang => lang.code);
 
     /**
      * Initialize the i18n module
@@ -34,7 +40,7 @@ const I18n = (function() {
         currentLanguage = lang || savedLang || browserLang || DEFAULT_LANGUAGE;
 
         // Ensure the language is supported
-        if (!SUPPORTED_LANGUAGES.includes(currentLanguage)) {
+        if (!SUPPORTED_LANGUAGE_CODES.includes(currentLanguage)) {
             currentLanguage = DEFAULT_LANGUAGE;
         }
 
@@ -98,7 +104,7 @@ const I18n = (function() {
      */
     function t(keyPath, params) {
         let result = getNestedValue(translations, keyPath);
-        
+
         // Fallback to English if not found
         if (result === undefined) {
             result = getNestedValue(fallbackTranslations, keyPath);
@@ -128,18 +134,46 @@ const I18n = (function() {
      */
     function getNestedValue(obj, path) {
         if (!obj || !path) return undefined;
-        
+
         const keys = path.split('.');
         let current = obj;
-        
+
         for (const key of keys) {
             if (current === undefined || current === null) {
                 return undefined;
             }
             current = current[key];
         }
-        
+
         return current;
+    }
+
+    function getElementTranslationParams(element, attributeName) {
+        const rawParams = element.getAttribute(attributeName);
+        if (!rawParams) {
+            return undefined;
+        }
+
+        try {
+            return JSON.parse(rawParams);
+        } catch (error) {
+            console.warn(`[i18n] Invalid translation params on ${attributeName}:`, rawParams, error);
+            return undefined;
+        }
+    }
+
+    function syncPageTitle(title) {
+        if (!title) {
+            return;
+        }
+
+        document.title = title;
+
+        if (window.pywebview?.api?.set_window_title) {
+            Promise.resolve(window.pywebview.api.set_window_title(title)).catch((error) => {
+                console.debug('[i18n] Failed to sync native window title:', error);
+            });
+        }
     }
 
     /**
@@ -149,13 +183,14 @@ const I18n = (function() {
         // Update page title
         const pageTitle = t('page.title');
         if (pageTitle && pageTitle !== 'page.title') {
-            document.title = pageTitle;
+            syncPageTitle(pageTitle);
         }
 
         // Update elements with data-i18n attribute
         document.querySelectorAll('[data-i18n]').forEach(element => {
             const key = element.getAttribute('data-i18n');
-            const translation = t(key);
+            const params = getElementTranslationParams(element, 'data-i18n-params');
+            const translation = t(key, params);
             if (translation !== key) {
                 // Check for suffix attribute (used for negative descriptors)
                 const suffix = element.getAttribute('data-i18n-suffix');
@@ -166,7 +201,9 @@ const I18n = (function() {
         // Update elements with data-i18n-title attribute (for tooltips)
         document.querySelectorAll('[data-i18n-title]').forEach(element => {
             const key = element.getAttribute('data-i18n-title');
-            const translation = t(key);
+            const params = getElementTranslationParams(element, 'data-i18n-title-params') ||
+                getElementTranslationParams(element, 'data-i18n-params');
+            const translation = t(key, params);
             if (translation !== key) {
                 element.setAttribute('title', translation);
             }
@@ -191,7 +228,7 @@ const I18n = (function() {
      * @returns {Promise<boolean>} - Resolves to true if successful
      */
     async function setLanguage(lang) {
-        if (!SUPPORTED_LANGUAGES.includes(lang)) {
+        if (!SUPPORTED_LANGUAGE_CODES.includes(lang)) {
             console.error(`[i18n] Unsupported language: ${lang}`);
             return false;
         }
@@ -206,14 +243,14 @@ const I18n = (function() {
             } else {
                 translations = await loadLanguageFile(lang);
             }
-            
+
             currentLanguage = lang;
             localStorage.setItem(STORAGE_KEY, lang);
             applyTranslations();
-            
+
             // Trigger custom event for components that need to update
             window.dispatchEvent(new CustomEvent('languageChanged', { detail: { language: lang } }));
-            
+
             console.log(`[i18n] Language changed to: ${lang}`);
             return true;
         } catch (error) {
@@ -235,10 +272,7 @@ const I18n = (function() {
      * @returns {Array<Object>} - Array of language objects with code and name
      */
     function getSupportedLanguages() {
-        return [
-            { code: 'en', name: 'English' },
-            { code: 'zh-CN', name: '简体中文' }
-        ];
+        return SUPPORTED_LANGUAGES.map(lang => ({ ...lang }));
     }
 
     /**
@@ -249,7 +283,7 @@ const I18n = (function() {
         const select = document.createElement('select');
         select.id = 'language-selector';
         select.className = 'styled-select language-select';
-        
+
         getSupportedLanguages().forEach(lang => {
             const option = document.createElement('option');
             option.value = lang.code;
@@ -284,6 +318,18 @@ const I18n = (function() {
 
 // Auto-initialize when DOM is ready (if not using as module)
 if (typeof document !== 'undefined') {
+    window.addEventListener('pywebviewready', () => {
+        if (typeof I18n !== 'undefined' && typeof I18n.t === 'function') {
+            const pageTitle = I18n.t('page.title');
+            if (pageTitle && pageTitle !== 'page.title') {
+                document.title = pageTitle;
+                if (window.pywebview?.api?.set_window_title) {
+                    Promise.resolve(window.pywebview.api.set_window_title(pageTitle)).catch(() => { });
+                }
+            }
+        }
+    });
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => I18n.init());
     } else {
