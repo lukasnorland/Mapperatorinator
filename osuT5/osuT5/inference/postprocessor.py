@@ -14,7 +14,7 @@ from slider import TimingPoint, Beatmap
 from config import InferenceConfig
 from .slider_path import SliderPath
 from .timing_points_change import TimingPointsChange, sort_timing_points
-from ..dataset.data_utils import get_groups, Group, get_median_mpb, BEAT_TYPES
+from ..dataset.data_utils import get_groups, Group, get_median_mpb, BEAT_TYPES, TIMED_EVENTS
 from ..tokenizer import Event, EventType
 
 OSU_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "template.osu")
@@ -163,7 +163,7 @@ class Postprocessor(object):
         slider_head = None
         anchor_info = []
         last_anchor = None
-        hold_note_start = None
+        hold_note_starts: dict[int, Group] = {}
         drumroll_start = None
         denden_start = None
 
@@ -172,7 +172,17 @@ class Postprocessor(object):
                 timedelta(milliseconds=self.offset), self.beat_length, 4, 2, -1, 100, None, False
             )]
 
-        groups, _ = get_groups(events, types_first=self.types_first)
+        groups, group_indices = get_groups(events, types_first=self.types_first)
+        valid_groups = []
+        for group, indices in zip(groups, group_indices):
+            # An absent timestamp must not become an object at Group's default
+            # time of zero. LAST_ANCHOR can be untimed geometry in V2 sliders.
+            requires_time = group.event_type in TIMED_EVENTS and group.event_type != EventType.LAST_ANCHOR
+            if requires_time and not any(events[i].type == EventType.TIME_SHIFT for i in indices):
+                self.logger.warning(f"Warning: Skipping {group.event_type.value} group without a timestamp")
+                continue
+            valid_groups.append(group)
+        groups = valid_groups
         last_x, last_y = 256, 192
 
         if self.snap_near_perfect_overlaps_enabled:
@@ -219,12 +229,21 @@ class Postprocessor(object):
                     timing = self.set_sv(timedelta(milliseconds=int(round(group.time))), group.scroll_speed, timing)
 
             elif hit_type == EventType.HOLD_NOTE:
+                column = min(max(int(group.x * beatmap_config.circle_size / 512), 0),
+                             int(beatmap_config.circle_size) - 1)
+                hold_note_start = hold_note_starts.get(column)
                 if hold_note_start is not None:
-                    self.logger.warning(f"Warning: Incomplete hold note at {int(round(hold_note_start.time))}")
+                    self.logger.warning(
+                        f"Warning: Incomplete hold note at {int(round(hold_note_start.time))} in column {column}")
 
-                hold_note_start = group
+                hold_note_starts[column] = group
 
-            elif hit_type == EventType.HOLD_NOTE_END and hold_note_start is not None:
+            elif hit_type == EventType.HOLD_NOTE_END:
+                column = min(max(int(group.x * beatmap_config.circle_size / 512), 0),
+                             int(beatmap_config.circle_size) - 1)
+                hold_note_start = hold_note_starts.pop(column, None)
+                if hold_note_start is None:
+                    continue
                 hitsound = hold_note_start.hitsounds[0] if len(hold_note_start.hitsounds) > 0 else 0
                 sampleset = hold_note_start.samplesets[0] if len(hold_note_start.samplesets) > 0 else 0
                 addition = hold_note_start.additions[0] if len(hold_note_start.additions) > 0 else 0
@@ -236,7 +255,6 @@ class Postprocessor(object):
                 if len(hold_note_start.volumes) > 0 and beatmap_config.mode != 3:
                     timing = self.set_volume(timedelta(milliseconds=int(round(hold_note_start.time))),
                                              hold_note_start.volumes[0], timing)
-                hold_note_start = None
 
             elif hit_type == EventType.DRUMROLL:
                 if drumroll_start is not None:
@@ -437,10 +455,18 @@ class Postprocessor(object):
                 else:
                     timing = self.set_sv(timedelta(milliseconds=group.time), group.scroll_speed, timing)
 
+        for column, hold_note_start in hold_note_starts.items():
+            self.logger.warning(
+                f"Warning: Incomplete hold note at {int(round(hold_note_start.time))} in column {column}")
+
         # Remove any greenlines before the first timingpoint where parent is None
         if len(timing) > 0:
             first_timing_point = next(tp for tp in timing if tp.parent is None)
             timing = [tp for tp in timing if tp.offset >= first_timing_point.offset]
+
+        # Holds are completed in end-time order, which may differ from their
+        # start-time order when different columns overlap.
+        hit_object_strings.sort(key=lambda hit_object: int(hit_object.split(",", 3)[2]))
 
         # Write .osu file
         with open(OSU_TEMPLATE_PATH, "r", encoding="utf-8") as tf:
@@ -744,10 +770,12 @@ class Postprocessor(object):
             tp_change = TimingPointsChange(tp, uninherited=True)
             timing = tp_change.add_change(timing, True)
 
-        if len(timing) == 0:
-            timing = [
-                TimingPoint(timedelta(milliseconds=markers[0].time), 1000, 4, 2, -1, 100, None, False)
-            ]
+        # Beats may precede the first predicted BPM change. Seed that initial
+        # section too, otherwise its beats are fitted against a future redline
+        # and disappear when the timing is parsed for map generation.
+        first_marker_offset = timedelta(milliseconds=markers[0].time)
+        if len(timing) == 0 or timing[0].offset > first_marker_offset:
+            timing.insert(0, TimingPoint(first_marker_offset, 1000, 4, 2, -1, 100, None, False))
 
         counter = 0
         last_measure_time = markers[0].time
